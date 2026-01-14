@@ -1,8 +1,8 @@
 {
-  "target_fp": "C:/SLM/python_code/images/char_hpk_128x128.bmp",
-  "correction_pattern_fp": "C:/SLM/Correction_patterns/CAL_LSH0805598_770nm.bmp",
+  "target_fp": "C:/WC/SelfEmployee_wc/2025/STED with Nir/Code/Simulation/SLM-control/Target_images/Test_1272x1024_small.bmp",
+  "correction_pattern_fp": "C:/WC/SelfEmployee_wc/2025/STED with Nir/Code/Simulation/SLM-control/vendor/Correction_patterns/CAL_LSH0805598_770nm.bmp",
   "source_fp": "",
-  "output_bmp_fp": "C:\\SLM\\python_code\\new_app\\output\\phase_mask.bmp",
+  "output_bmp_fp": "C:/WC/SelfEmployee_wc/2025/STED with Nir/Code/Simulation/SLM-control/out_mask/calculated_phase_mask.bmp",
   "size_mode": "tiled",
   "signal_2pi": 204,
   "method": "far",
