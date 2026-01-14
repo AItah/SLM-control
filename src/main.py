@@ -14,6 +14,15 @@ Fixes:
 from gerchberg_saxton import run_gerchberg_saxton
 from gen_phase_map import run as run_gen_phase_map
 from slm_cls import SLM, SLMError
+from slm_mask import (
+    BeamParams,
+    SlmParams,
+    SteeringRequest,
+    generate_mask,
+    load_beam_params,
+    load_calibration_mask,
+    save_mask,
+)
 import os
 import sys
 import json
@@ -39,8 +48,13 @@ except Exception:
     QT_LIB = 'PySide6'
 
 HERE = Path(__file__).resolve().parent
+ROOT = HERE.parent
+DEFAULT_SLM_PARAMS_JSON = Path("vendor") / "LCOS_SLM_X15213.json"
+DEFAULT_BEAM_PARAMS_JSON = Path("GaussianBeam.json")
 if str(HERE) not in sys.path:
     sys.path.insert(0, str(HERE))
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 # ---------------------- App Defaults ----------------------
 # Use the provided defaults filename
@@ -387,9 +401,19 @@ class MainWindow(QtWidgets.QMainWindow):
         self.tabs.addTab(self.tab_gen, "1) Generate CGH")
         self._build_tab_gen()
 
+        # --- SLM parameters tab
+        self.tab_slm_params = QtWidgets.QWidget()
+        self.tabs.addTab(self.tab_slm_params, "2) SLM Parameters")
+        self._build_tab_slm_params()
+
+        # --- Vortex mask tab
+        self.tab_vortex = QtWidgets.QWidget()
+        self.tabs.addTab(self.tab_vortex, "3) Vortex Mask")
+        self._build_tab_vortex()
+
         # --- SLM tab
         self.tab_slm = QtWidgets.QWidget()
-        self.tabs.addTab(self.tab_slm, "2) SLM Control")
+        self.tabs.addTab(self.tab_slm, "4) SLM Control")
         self._build_tab_slm()
 
         # Bottom log
@@ -424,33 +448,16 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_output.clicked.connect(
             lambda: self._save_file(self.ed_output, "BMP (*.bmp)"))
 
-        # SLM size and optics params
-        self.spin_slm_nx = QtWidgets.QSpinBox()
-        self.spin_slm_nx.setRange(64, 8192)
-        self.spin_slm_nx.setValue(1272)
-        self.spin_slm_ny = QtWidgets.QSpinBox()
-        self.spin_slm_ny.setRange(64, 8192)
-        self.spin_slm_ny.setValue(1024)
-
+        # Optics params
         self.dsb_wavelength_nm = QtWidgets.QDoubleSpinBox()
         self.dsb_wavelength_nm.setRange(200.0, 2000.0)
         self.dsb_wavelength_nm.setValue(775.0)
         self.dsb_wavelength_nm.setDecimals(3)
         self.dsb_wavelength_nm.setSuffix(" nm")
 
-        self.dsb_pixel_um = QtWidgets.QDoubleSpinBox()
-        self.dsb_pixel_um.setRange(1.0, 100.0)
-        self.dsb_pixel_um.setValue(12.5)
-        self.dsb_pixel_um.setDecimals(3)
-        self.dsb_pixel_um.setSuffix(" µm")
-
         # Params
         self.cmb_size_mode = QtWidgets.QComboBox()
         self.cmb_size_mode.addItems(["resized", "tiled"])
-
-        self.spin_signal_2pi = QtWidgets.QSpinBox()
-        self.spin_signal_2pi.setRange(1, 255)
-        self.spin_signal_2pi.setValue(205)
 
         self.cmb_method = QtWidgets.QComboBox()
         self.cmb_method.addItems(["far", "near"])
@@ -526,21 +533,12 @@ class MainWindow(QtWidgets.QMainWindow):
         lay.addWidget(self.btn_output, r, 4)
         r += 1
 
-        lay.addWidget(QtWidgets.QLabel("SLM size (Nx × Ny):"), r, 0)
-        lay.addWidget(self.spin_slm_nx, r, 1)
-        lay.addWidget(self.spin_slm_ny, r, 2)
-        r += 1
-
         lay.addWidget(QtWidgets.QLabel("Wavelength:"), r, 0)
         lay.addWidget(self.dsb_wavelength_nm, r, 1)
-        lay.addWidget(QtWidgets.QLabel("Pixel size:"), r, 2)
-        lay.addWidget(self.dsb_pixel_um, r, 3)
         r += 1
 
         lay.addWidget(QtWidgets.QLabel("Size mode:"), r, 0)
         lay.addWidget(self.cmb_size_mode, r, 1)
-        lay.addWidget(QtWidgets.QLabel("Signal @ 2π:"), r, 2)
-        lay.addWidget(self.spin_signal_2pi, r, 3)
         r += 1
 
         lay.addWidget(QtWidgets.QLabel("Propagation method:"), r, 0)
@@ -587,6 +585,242 @@ class MainWindow(QtWidgets.QMainWindow):
 
         lay.setColumnStretch(1, 1)
         lay.setColumnStretch(3, 1)
+
+    def _build_tab_slm_params(self):
+        lay = QtWidgets.QGridLayout(self.tab_slm_params)
+
+        self.ed_slm_params = QtWidgets.QLineEdit()
+        self.btn_slm_params_browse = QtWidgets.QPushButton("Browse.")
+        self.btn_slm_params_load = QtWidgets.QPushButton("Load")
+        self.btn_slm_params_browse.clicked.connect(
+            lambda: self._pick_file(self.ed_slm_params, "JSON (*.json)"))
+        self.btn_slm_params_load.clicked.connect(
+            self.on_load_slm_params_clicked)
+
+        self.spin_slm_nx = QtWidgets.QSpinBox()
+        self.spin_slm_nx.setRange(64, 8192)
+        self.spin_slm_nx.setValue(1272)
+        self.spin_slm_ny = QtWidgets.QSpinBox()
+        self.spin_slm_ny.setRange(64, 8192)
+        self.spin_slm_ny.setValue(1024)
+
+        self.dsb_px_side_m = QtWidgets.QDoubleSpinBox()
+        self.dsb_px_side_m.setRange(1e-8, 1e-3)
+        self.dsb_px_side_m.setDecimals(10)
+        self.dsb_px_side_m.setValue(12.5e-6)
+        self.dsb_px_side_m.setSingleStep(1e-6)
+        self.dsb_px_side_m.setSuffix(" m")
+
+        self.dsb_py_side_m = QtWidgets.QDoubleSpinBox()
+        self.dsb_py_side_m.setRange(1e-8, 1e-3)
+        self.dsb_py_side_m.setDecimals(10)
+        self.dsb_py_side_m.setValue(12.5e-6)
+        self.dsb_py_side_m.setSingleStep(1e-6)
+        self.dsb_py_side_m.setSuffix(" m")
+
+        self.dsb_fill_factor = QtWidgets.QDoubleSpinBox()
+        self.dsb_fill_factor.setRange(0.0, 100.0)
+        self.dsb_fill_factor.setDecimals(1)
+        self.dsb_fill_factor.setValue(96.8)
+        self.dsb_fill_factor.setSuffix(" %")
+
+        self.spin_c2pi2unit = QtWidgets.QSpinBox()
+        self.spin_c2pi2unit.setRange(1, 255)
+        self.spin_c2pi2unit.setValue(204)
+
+        r = 0
+        lay.addWidget(QtWidgets.QLabel("SLM params JSON:"), r, 0)
+        lay.addWidget(self.ed_slm_params, r, 1, 1, 2)
+        lay.addWidget(self.btn_slm_params_browse, r, 3)
+        lay.addWidget(self.btn_slm_params_load, r, 4)
+        r += 1
+
+        lay.addWidget(QtWidgets.QLabel("Nx (pixels):"), r, 0)
+        lay.addWidget(self.spin_slm_nx, r, 1)
+        lay.addWidget(QtWidgets.QLabel("Ny (pixels):"), r, 2)
+        lay.addWidget(self.spin_slm_ny, r, 3)
+        r += 1
+
+        lay.addWidget(QtWidgets.QLabel("px_side_m:"), r, 0)
+        lay.addWidget(self.dsb_px_side_m, r, 1)
+        lay.addWidget(QtWidgets.QLabel("py_side_m:"), r, 2)
+        lay.addWidget(self.dsb_py_side_m, r, 3)
+        r += 1
+
+        lay.addWidget(QtWidgets.QLabel("Fill factor (%):"), r, 0)
+        lay.addWidget(self.dsb_fill_factor, r, 1)
+        lay.addWidget(QtWidgets.QLabel("c2pi2unit:"), r, 2)
+        lay.addWidget(self.spin_c2pi2unit, r, 3)
+        r += 1
+
+        lay.setColumnStretch(1, 1)
+        lay.setColumnStretch(3, 1)
+
+    def _build_tab_vortex(self):
+        lay = QtWidgets.QGridLayout(self.tab_vortex)
+
+        self.ed_beam_params = QtWidgets.QLineEdit()
+        self.btn_beam_params_browse = QtWidgets.QPushButton("Browse.")
+        self.btn_beam_params_load = QtWidgets.QPushButton("Load")
+        self.btn_beam_params_browse.clicked.connect(
+            lambda: self._pick_file(self.ed_beam_params, "JSON (*.json)"))
+        self.btn_beam_params_load.clicked.connect(
+            self.on_load_beam_params_clicked)
+
+        self.dsb_beam_lambda_m = QtWidgets.QDoubleSpinBox()
+        self.dsb_beam_lambda_m.setRange(1e-9, 1e-3)
+        self.dsb_beam_lambda_m.setDecimals(10)
+        self.dsb_beam_lambda_m.setValue(7.75e-7)
+        self.dsb_beam_lambda_m.setSingleStep(1e-9)
+        self.dsb_beam_lambda_m.setSuffix(" m")
+
+        self.ed_vortex_calib = QtWidgets.QLineEdit()
+        self.btn_vortex_calib = QtWidgets.QPushButton("Browse.")
+        self.btn_vortex_calib.clicked.connect(
+            lambda: self._pick_file(self.ed_vortex_calib, "BMP (*.bmp)"))
+
+        self.ed_vortex_output_dir = QtWidgets.QLineEdit()
+        self.btn_vortex_output_dir = QtWidgets.QPushButton("Browse.")
+        self.btn_vortex_output_dir.clicked.connect(
+            lambda: self._pick_dir(self.ed_vortex_output_dir))
+
+        self.ed_vortex_output_name = QtWidgets.QLineEdit()
+
+        self.spin_vortex_ell = QtWidgets.QSpinBox()
+        self.spin_vortex_ell.setRange(1, 1000)
+        self.spin_vortex_ell.setValue(1)
+
+        self.dsb_vortex_sft_x_mm = QtWidgets.QDoubleSpinBox()
+        self.dsb_vortex_sft_x_mm.setRange(-1000.0, 1000.0)
+        self.dsb_vortex_sft_x_mm.setDecimals(3)
+        self.dsb_vortex_sft_x_mm.setSingleStep(0.01)
+        self.dsb_vortex_sft_x_mm.setSuffix(" mm")
+
+        self.dsb_vortex_sft_y_mm = QtWidgets.QDoubleSpinBox()
+        self.dsb_vortex_sft_y_mm.setRange(-1000.0, 1000.0)
+        self.dsb_vortex_sft_y_mm.setDecimals(3)
+        self.dsb_vortex_sft_y_mm.setSingleStep(0.01)
+        self.dsb_vortex_sft_y_mm.setSuffix(" mm")
+
+        self.dsb_vortex_aperture_mm = QtWidgets.QDoubleSpinBox()
+        self.dsb_vortex_aperture_mm.setRange(0.0, 1000.0)
+        self.dsb_vortex_aperture_mm.setDecimals(3)
+        self.dsb_vortex_aperture_mm.setSingleStep(0.01)
+        self.dsb_vortex_aperture_mm.setSuffix(" mm")
+
+        self.chk_vortex_use_forked = QtWidgets.QCheckBox(
+            "Use forked grating")
+        self.chk_vortex_use_forked.setChecked(True)
+        self.chk_vortex_force_zero = QtWidgets.QCheckBox(
+            "Force pixel-zero center")
+        self.chk_vortex_force_zero.setChecked(True)
+        self.chk_vortex_use_forked.stateChanged.connect(
+            self._update_vortex_steer_mode)
+
+        self.cmb_vortex_steer_mode = QtWidgets.QComboBox()
+        self.cmb_vortex_steer_mode.addItems(["none", "angle", "shift"])
+        self.cmb_vortex_steer_mode.currentTextChanged.connect(
+            self._update_vortex_steer_mode)
+
+        self.dsb_vortex_theta_x_deg = QtWidgets.QDoubleSpinBox()
+        self.dsb_vortex_theta_x_deg.setRange(-89.0, 89.0)
+        self.dsb_vortex_theta_x_deg.setDecimals(4)
+        self.dsb_vortex_theta_x_deg.setSuffix(" deg")
+
+        self.dsb_vortex_theta_y_deg = QtWidgets.QDoubleSpinBox()
+        self.dsb_vortex_theta_y_deg.setRange(-89.0, 89.0)
+        self.dsb_vortex_theta_y_deg.setDecimals(4)
+        self.dsb_vortex_theta_y_deg.setSuffix(" deg")
+
+        self.dsb_vortex_delta_x_mm = QtWidgets.QDoubleSpinBox()
+        self.dsb_vortex_delta_x_mm.setRange(-1000.0, 1000.0)
+        self.dsb_vortex_delta_x_mm.setDecimals(4)
+        self.dsb_vortex_delta_x_mm.setSuffix(" mm")
+
+        self.dsb_vortex_delta_y_mm = QtWidgets.QDoubleSpinBox()
+        self.dsb_vortex_delta_y_mm.setRange(-1000.0, 1000.0)
+        self.dsb_vortex_delta_y_mm.setDecimals(4)
+        self.dsb_vortex_delta_y_mm.setSuffix(" mm")
+
+        self.dsb_vortex_focal_length_m = QtWidgets.QDoubleSpinBox()
+        self.dsb_vortex_focal_length_m.setRange(0.001, 10.0)
+        self.dsb_vortex_focal_length_m.setDecimals(4)
+        self.dsb_vortex_focal_length_m.setValue(0.2)
+        self.dsb_vortex_focal_length_m.setSuffix(" m")
+
+        self.btn_vortex_generate = QtWidgets.QPushButton("Generate Vortex Mask")
+        self.btn_vortex_generate.clicked.connect(
+            self.on_generate_vortex_clicked)
+
+        r = 0
+        lay.addWidget(QtWidgets.QLabel("Beam params JSON:"), r, 0)
+        lay.addWidget(self.ed_beam_params, r, 1, 1, 2)
+        lay.addWidget(self.btn_beam_params_browse, r, 3)
+        lay.addWidget(self.btn_beam_params_load, r, 4)
+        r += 1
+
+        lay.addWidget(QtWidgets.QLabel("lambda_m:"), r, 0)
+        lay.addWidget(self.dsb_beam_lambda_m, r, 1)
+        r += 1
+
+        lay.addWidget(QtWidgets.QLabel("Calibration mask (optional):"), r, 0)
+        lay.addWidget(self.ed_vortex_calib, r, 1, 1, 3)
+        lay.addWidget(self.btn_vortex_calib, r, 4)
+        r += 1
+
+        lay.addWidget(QtWidgets.QLabel("Output dir:"), r, 0)
+        lay.addWidget(self.ed_vortex_output_dir, r, 1, 1, 3)
+        lay.addWidget(self.btn_vortex_output_dir, r, 4)
+        r += 1
+
+        lay.addWidget(QtWidgets.QLabel("Output filename (optional):"), r, 0)
+        lay.addWidget(self.ed_vortex_output_name, r, 1, 1, 3)
+        r += 1
+
+        lay.addWidget(QtWidgets.QLabel("ell:"), r, 0)
+        lay.addWidget(self.spin_vortex_ell, r, 1)
+        r += 1
+
+        lay.addWidget(QtWidgets.QLabel("Shift X (mm):"), r, 0)
+        lay.addWidget(self.dsb_vortex_sft_x_mm, r, 1)
+        lay.addWidget(QtWidgets.QLabel("Shift Y (mm):"), r, 2)
+        lay.addWidget(self.dsb_vortex_sft_y_mm, r, 3)
+        r += 1
+
+        lay.addWidget(QtWidgets.QLabel("Aperture radius (mm):"), r, 0)
+        lay.addWidget(self.dsb_vortex_aperture_mm, r, 1)
+        r += 1
+
+        lay.addWidget(self.chk_vortex_use_forked, r, 0, 1, 2)
+        lay.addWidget(self.chk_vortex_force_zero, r, 2, 1, 2)
+        r += 1
+
+        lay.addWidget(QtWidgets.QLabel("Steering mode:"), r, 0)
+        lay.addWidget(self.cmb_vortex_steer_mode, r, 1)
+        r += 1
+
+        lay.addWidget(QtWidgets.QLabel("theta_x_deg:"), r, 0)
+        lay.addWidget(self.dsb_vortex_theta_x_deg, r, 1)
+        lay.addWidget(QtWidgets.QLabel("theta_y_deg:"), r, 2)
+        lay.addWidget(self.dsb_vortex_theta_y_deg, r, 3)
+        r += 1
+
+        lay.addWidget(QtWidgets.QLabel("delta_x_mm:"), r, 0)
+        lay.addWidget(self.dsb_vortex_delta_x_mm, r, 1)
+        lay.addWidget(QtWidgets.QLabel("delta_y_mm:"), r, 2)
+        lay.addWidget(self.dsb_vortex_delta_y_mm, r, 3)
+        r += 1
+
+        lay.addWidget(QtWidgets.QLabel("focal_length_m:"), r, 0)
+        lay.addWidget(self.dsb_vortex_focal_length_m, r, 1)
+        r += 1
+
+        lay.addWidget(self.btn_vortex_generate, r, 0, 1, 5)
+        r += 1
+
+        lay.setColumnStretch(1, 1)
+        lay.setColumnStretch(3, 1)
+        self._update_vortex_steer_mode()
 
     def _build_tab_slm(self):
         lay = QtWidgets.QGridLayout(self.tab_slm)
@@ -691,6 +925,26 @@ class MainWindow(QtWidgets.QMainWindow):
                 fn += ".bmp"
             line_edit.setText(fn)
 
+    def _pick_dir(self, line_edit: QtWidgets.QLineEdit):
+        fn = QtWidgets.QFileDialog.getExistingDirectory(
+            self, "Select folder", line_edit.text())
+        if fn:
+            line_edit.setText(fn)
+
+    def on_load_slm_params_clicked(self):
+        path_str = self.ed_slm_params.text().strip()
+        if not path_str:
+            self.append_error("SLM params JSON path is empty.")
+            return
+        self._load_slm_params_json(Path(path_str))
+
+    def on_load_beam_params_clicked(self):
+        path_str = self.ed_beam_params.text().strip()
+        if not path_str:
+            self.append_error("Beam params JSON path is empty.")
+            return
+        self._load_beam_params_json(Path(path_str))
+
     def _refresh_target_preview(self):
         try:
             fn = self.ed_target.text().strip()
@@ -734,6 +988,105 @@ class MainWindow(QtWidgets.QMainWindow):
         except Exception as e:
             self.append_error(exception_to_text(e))
 
+    def _update_vortex_steer_mode(self):
+        use_forked = self.chk_vortex_use_forked.isChecked()
+        mode = self.cmb_vortex_steer_mode.currentText()
+        angle = use_forked and mode == "angle"
+        shift = use_forked and mode == "shift"
+
+        self.dsb_vortex_theta_x_deg.setEnabled(angle)
+        self.dsb_vortex_theta_y_deg.setEnabled(angle)
+        self.dsb_vortex_delta_x_mm.setEnabled(shift)
+        self.dsb_vortex_delta_y_mm.setEnabled(shift)
+        self.dsb_vortex_focal_length_m.setEnabled(shift)
+
+    def on_generate_vortex_clicked(self):
+        try:
+            slm = SlmParams(
+                nx=int(self.spin_slm_nx.value()),
+                ny=int(self.spin_slm_ny.value()),
+                px_m=float(self.dsb_px_side_m.value()),
+                py_m=float(self.dsb_py_side_m.value()),
+                c2pi2unit=int(self.spin_c2pi2unit.value()),
+            )
+            beam = BeamParams(lambda_m=float(self.dsb_beam_lambda_m.value()))
+
+            ell = int(self.spin_vortex_ell.value())
+            sft_x = float(self.dsb_vortex_sft_x_mm.value()) * 1e-3
+            sft_y = float(self.dsb_vortex_sft_y_mm.value()) * 1e-3
+            use_forked = self.chk_vortex_use_forked.isChecked()
+            force_zero = self.chk_vortex_force_zero.isChecked()
+
+            aperture_radius_m = None
+            aperture_mm = float(self.dsb_vortex_aperture_mm.value())
+            if aperture_mm > 0:
+                aperture_radius_m = aperture_mm * 1e-3
+
+            steer_req = None
+            if use_forked:
+                mode = self.cmb_vortex_steer_mode.currentText()
+                if mode == "angle":
+                    steer_req = SteeringRequest(
+                        theta_x_deg=float(self.dsb_vortex_theta_x_deg.value()),
+                        theta_y_deg=float(self.dsb_vortex_theta_y_deg.value()),
+                    )
+                elif mode == "shift":
+                    steer_req = SteeringRequest(
+                        delta_x_mm=float(self.dsb_vortex_delta_x_mm.value()),
+                        delta_y_mm=float(self.dsb_vortex_delta_y_mm.value()),
+                        focal_length_m=float(
+                            self.dsb_vortex_focal_length_m.value()),
+                    )
+
+            calib_mask = None
+            calib_path = self.ed_vortex_calib.text().strip()
+            if calib_path:
+                resolved = self._resolve_path(Path(calib_path))
+                calib_mask = load_calibration_mask(resolved)
+
+            result = generate_mask(
+                slm=slm,
+                beam=beam,
+                ell=ell,
+                sft_x=sft_x,
+                sft_y=sft_y,
+                steer_req=steer_req,
+                use_forked=use_forked,
+                aperture_radius_m=aperture_radius_m,
+                force_zero=force_zero,
+                calib_mask=calib_mask,
+            )
+
+            out_dir_str = self.ed_vortex_output_dir.text().strip()
+            if out_dir_str:
+                out_dir = self._resolve_path(Path(out_dir_str))
+            else:
+                out_dir = self._resolve_path(Path("masks_out"))
+            out_dir.mkdir(parents=True, exist_ok=True)
+
+            out_name = self.ed_vortex_output_name.text().strip()
+            if out_name:
+                if not out_name.lower().endswith(".bmp"):
+                    out_name += ".bmp"
+                out_path = out_dir / out_name
+            else:
+                out_path = out_dir / result.filename
+
+            save_mask(out_path, result.mask_u8)
+            self.append_log(f"Vortex mask saved: {out_path}")
+            if result.steer:
+                self.append_log(
+                    "Steer mode: {mode} | dx={dx:.3f} mm, dy={dy:.3f} mm | "
+                    "clamped={clamped}".format(
+                        mode=result.steer.mode,
+                        dx=result.steer.delta_x_mm,
+                        dy=result.steer.delta_y_mm,
+                        clamped=result.steer.clamped,
+                    )
+                )
+        except Exception as e:
+            self.append_error(exception_to_text(e))
+
     def _build_params(self):
         """Collect UI params for gen_phase_map.run"""
         target = self.ed_target.text().strip()
@@ -747,7 +1100,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         nx, ny = int(self.spin_slm_nx.value()), int(self.spin_slm_ny.value())
         wavelength_m = float(self.dsb_wavelength_nm.value()) * 1e-9
-        pixel_size_m = float(self.dsb_pixel_um.value()) * 1e-6
+        pixel_size_m = float(self.dsb_px_side_m.value())
 
         params = dict(
             num_iter=int(self.spin_iter.value()),
@@ -755,7 +1108,7 @@ class MainWindow(QtWidgets.QMainWindow):
             slm_ny=ny,
             size_mode=self.cmb_size_mode.currentText(),
             correction_pattern_fp=corr,            # may be '' (optional)
-            signal_2pi=int(self.spin_signal_2pi.value()),
+            signal_2pi=int(self.spin_c2pi2unit.value()),
             target_fp=target,
             output_bmp_fp=out_bmp,
             source_fp=src if src else '',
@@ -975,6 +1328,48 @@ class MainWindow(QtWidgets.QMainWindow):
         self.log.appendPlainText("ERROR: " + text)
 
     # ---- Defaults JSON ----
+    def _resolve_path(self, path: Path) -> Path:
+        if path.is_absolute():
+            return path
+        return (ROOT / path).resolve()
+
+    def _load_slm_params_json(self, path: Path) -> bool:
+        resolved = self._resolve_path(path)
+        try:
+            with open(resolved, 'r', encoding='utf-8') as f:
+                cfg = json.load(f)
+        except Exception as e:
+            self.append_error(f"Failed to load SLM params JSON: {e}")
+            return False
+
+        if 'Nx' in cfg:
+            self.spin_slm_nx.setValue(int(cfg['Nx']))
+        if 'Ny' in cfg:
+            self.spin_slm_ny.setValue(int(cfg['Ny']))
+        if 'px_side_m' in cfg:
+            self.dsb_px_side_m.setValue(float(cfg['px_side_m']))
+        if 'py_side_m' in cfg:
+            self.dsb_py_side_m.setValue(float(cfg['py_side_m']))
+        if 'Fill_factor_percent' in cfg:
+            self.dsb_fill_factor.setValue(float(cfg['Fill_factor_percent']))
+        if 'c2pi2unit' in cfg:
+            self.spin_c2pi2unit.setValue(int(cfg['c2pi2unit']))
+
+        self.append_log(f"SLM parameters loaded from: {resolved}")
+        return True
+
+    def _load_beam_params_json(self, path: Path) -> bool:
+        resolved = self._resolve_path(path)
+        try:
+            beam = load_beam_params(resolved)
+        except Exception as e:
+            self.append_error(f"Failed to load beam params JSON: {e}")
+            return False
+
+        self.dsb_beam_lambda_m.setValue(float(beam.lambda_m))
+        self.append_log(f"Beam parameters loaded from: {resolved}")
+        return True
+
     def _load_defaults_json(self, path: Path):
         try:
             with open(path, 'r', encoding='utf-8') as f:
@@ -984,12 +1379,62 @@ class MainWindow(QtWidgets.QMainWindow):
             return
 
         # Apply to UI with fallback
+        slm_params_fp = cfg.get('slm_params_fp', str(DEFAULT_SLM_PARAMS_JSON))
+        self.ed_slm_params.setText(slm_params_fp)
+        slm_loaded = self._load_slm_params_json(Path(slm_params_fp))
+        if not slm_loaded:
+            self.spin_slm_nx.setValue(int(cfg.get('slm_nx', 1272)))
+            self.spin_slm_ny.setValue(int(cfg.get('slm_ny', 1024)))
+            if 'px_side_m' in cfg:
+                self.dsb_px_side_m.setValue(float(cfg['px_side_m']))
+            elif 'pixel_size_um' in cfg:
+                self.dsb_px_side_m.setValue(float(cfg['pixel_size_um']) * 1e-6)
+            if 'py_side_m' in cfg:
+                self.dsb_py_side_m.setValue(float(cfg['py_side_m']))
+            elif 'pixel_size_um' in cfg:
+                self.dsb_py_side_m.setValue(float(cfg['pixel_size_um']) * 1e-6)
+            self.dsb_fill_factor.setValue(
+                float(cfg.get('fill_factor_percent', 96.8)))
+            self.spin_c2pi2unit.setValue(
+                int(cfg.get('c2pi2unit', cfg.get('signal_2pi', 204))))
+
+        beam_params_fp = cfg.get('beam_params_fp', str(DEFAULT_BEAM_PARAMS_JSON))
+        self.ed_beam_params.setText(beam_params_fp)
+        beam_loaded = self._load_beam_params_json(Path(beam_params_fp))
+        if not beam_loaded:
+            self.dsb_beam_lambda_m.setValue(float(cfg.get('beam_lambda_m', 7.75e-7)))
+
+        default_out_dir = str(ROOT / "masks_out")
+        self.ed_vortex_calib.setText(cfg.get('vortex_calib_mask_fp', ''))
+        self.ed_vortex_output_dir.setText(
+            cfg.get('vortex_output_dir', default_out_dir))
+        self.ed_vortex_output_name.setText(cfg.get('vortex_output_name', ''))
+        self.spin_vortex_ell.setValue(int(cfg.get('vortex_ell', 1)))
+        self.dsb_vortex_sft_x_mm.setValue(float(cfg.get('vortex_sft_x_mm', 0.0)))
+        self.dsb_vortex_sft_y_mm.setValue(float(cfg.get('vortex_sft_y_mm', 0.0)))
+        self.dsb_vortex_aperture_mm.setValue(
+            float(cfg.get('vortex_aperture_radius_mm', 0.0)))
+        self.chk_vortex_use_forked.setChecked(
+            bool(cfg.get('vortex_use_forked', True)))
+        self.chk_vortex_force_zero.setChecked(
+            bool(cfg.get('vortex_force_zero', True)))
+        self.cmb_vortex_steer_mode.setCurrentText(
+            cfg.get('vortex_steer_mode', 'none'))
+        self.dsb_vortex_theta_x_deg.setValue(
+            float(cfg.get('vortex_theta_x_deg', 0.0)))
+        self.dsb_vortex_theta_y_deg.setValue(
+            float(cfg.get('vortex_theta_y_deg', 0.0)))
+        self.dsb_vortex_delta_x_mm.setValue(
+            float(cfg.get('vortex_delta_x_mm', 0.0)))
+        self.dsb_vortex_delta_y_mm.setValue(
+            float(cfg.get('vortex_delta_y_mm', 0.0)))
+        self.dsb_vortex_focal_length_m.setValue(
+            float(cfg.get('vortex_focal_length_m', 0.2)))
         self.ed_target.setText(cfg.get('target_fp', self.ed_target.text()))
         self.ed_correction.setText(cfg.get('correction_pattern_fp', ''))
         self.ed_source.setText(cfg.get('source_fp', ''))
         self.ed_output.setText(cfg.get('output_bmp_fp', self.ed_output.text()))
         self.cmb_size_mode.setCurrentText(cfg.get('size_mode', 'resized'))
-        self.spin_signal_2pi.setValue(int(cfg.get('signal_2pi', 205)))
         self.cmb_method.setCurrentText(cfg.get('method', 'far'))
         self.dsb_z.setValue(float(cfg.get('z', 0.4)))
         self.dsb_M.setValue(float(cfg.get('M', 1.0)))
@@ -1001,15 +1446,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self.chk_watchdog.setChecked(bool(cfg.get('watchdog_enabled', False)))
         self.chk_plot.setChecked(bool(cfg.get('show_gs_plot', False)))
 
-        # New: optics + SLM size
+        # New: optics
         self.dsb_wavelength_nm.setValue(float(cfg.get('wavelength_nm', 775.0)))
-        self.dsb_pixel_um.setValue(float(cfg.get('pixel_size_um', 12.5)))
-        self.spin_slm_nx.setValue(int(cfg.get('slm_nx', 1272)))
-        self.spin_slm_ny.setValue(int(cfg.get('slm_ny', 1024)))
 
         # New: temp threshold
         self.temp_threshold_c = float(cfg.get('temperature_threshold_c', 35.0))
 
+        self._update_vortex_steer_mode()
         self.append_log(f"Defaults loaded from: {path}")
 
     def _save_defaults_json(self, path: Path):
@@ -1018,8 +1461,28 @@ class MainWindow(QtWidgets.QMainWindow):
             correction_pattern_fp=self.ed_correction.text().strip(),
             source_fp=self.ed_source.text().strip(),
             output_bmp_fp=self.ed_output.text().strip(),
+            slm_params_fp=self.ed_slm_params.text().strip(),
+            beam_params_fp=self.ed_beam_params.text().strip(),
+            beam_lambda_m=float(self.dsb_beam_lambda_m.value()),
+            vortex_calib_mask_fp=self.ed_vortex_calib.text().strip(),
+            vortex_output_dir=self.ed_vortex_output_dir.text().strip(),
+            vortex_output_name=self.ed_vortex_output_name.text().strip(),
+            vortex_ell=int(self.spin_vortex_ell.value()),
+            vortex_sft_x_mm=float(self.dsb_vortex_sft_x_mm.value()),
+            vortex_sft_y_mm=float(self.dsb_vortex_sft_y_mm.value()),
+            vortex_use_forked=bool(self.chk_vortex_use_forked.isChecked()),
+            vortex_force_zero=bool(self.chk_vortex_force_zero.isChecked()),
+            vortex_aperture_radius_mm=float(
+                self.dsb_vortex_aperture_mm.value()),
+            vortex_steer_mode=self.cmb_vortex_steer_mode.currentText(),
+            vortex_theta_x_deg=float(self.dsb_vortex_theta_x_deg.value()),
+            vortex_theta_y_deg=float(self.dsb_vortex_theta_y_deg.value()),
+            vortex_delta_x_mm=float(self.dsb_vortex_delta_x_mm.value()),
+            vortex_delta_y_mm=float(self.dsb_vortex_delta_y_mm.value()),
+            vortex_focal_length_m=float(self.dsb_vortex_focal_length_m.value()),
             size_mode=self.cmb_size_mode.currentText(),
-            signal_2pi=int(self.spin_signal_2pi.value()),
+            c2pi2unit=int(self.spin_c2pi2unit.value()),
+            signal_2pi=int(self.spin_c2pi2unit.value()),
             method=self.cmb_method.currentText(),
             z=float(self.dsb_z.value()),
             M=float(self.dsb_M.value()),
@@ -1032,9 +1495,12 @@ class MainWindow(QtWidgets.QMainWindow):
             show_gs_plot=bool(self.chk_plot.isChecked()),
             # New:
             wavelength_nm=float(self.dsb_wavelength_nm.value()),
-            pixel_size_um=float(self.dsb_pixel_um.value()),
             slm_nx=int(self.spin_slm_nx.value()),
             slm_ny=int(self.spin_slm_ny.value()),
+            px_side_m=float(self.dsb_px_side_m.value()),
+            py_side_m=float(self.dsb_py_side_m.value()),
+            pixel_size_um=float(self.dsb_px_side_m.value()) * 1e6,
+            fill_factor_percent=float(self.dsb_fill_factor.value()),
             temperature_threshold_c=float(self.temp_threshold_c),
         )
         try:

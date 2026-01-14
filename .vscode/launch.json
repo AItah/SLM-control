@@ -7,7 +7,7 @@
             "type": "debugpy",  // Use debugpy for Python debugging (required now)
             "request": "launch",  // Launch the program without interactive debugging
             // "program": "${file}",
-            "program": "${workspaceFolder}/src/slm_cgh_gui_v2.py",  // Path to your Python script
+            "program": "${workspaceFolder}/src/main.py",  // Path to your Python script
             "console": "integratedTerminal",  // Runs in the integrated terminal
             "justMyCode": false,  // false = breaks also at 3rd parties libraries breakpoints
             "stopOnEntry": false,  // Do not stop on the first line of code
