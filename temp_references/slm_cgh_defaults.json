@@ -1,0 +1,29 @@
+  {
+
+  "target_fp": "C:/SLM/python_code/images/hole_1272X1024.bmp",
+  "correction_pattern_fp": "C:/SLM/Correction_patterns/CAL_LSH0805598_770nm.bmp",
+  "source_fp": "",
+  "output_bmp_fp": "C:\\SLM\\python_code\\output\\phase_mask.bmp",
+
+  "size_mode": "resized",
+  "signal_2pi": 205,
+  "method": "far",
+  "z": 0.4,
+  "M": 1.0,
+  "num_iter": 100,
+  "tilt_x_deg": 0.0,
+  "tilt_y_deg": 0.0,
+  "slot": 0,
+
+  "watchdog_interval_s": 10,
+  "watchdog_enabled": false,
+
+  "show_gs_plot": false,
+
+  "wavelength_nm": 775.0,
+  "pixel_size_um": 12.5,
+  "slm_nx": 1272,
+  "slm_ny": 1024,
+
+  "temperature_threshold_c": 35.0
+}
