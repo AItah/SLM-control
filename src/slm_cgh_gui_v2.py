@@ -665,6 +665,15 @@ class MainWindow(QtWidgets.QMainWindow):
             QtCore.QTimer.singleShot(0, self._refresh_target_preview)
         return super().eventFilter(obj, event)
 
+    def closeEvent(self, event):
+        try:
+            defaults_path = Path(self.ed_defaults.text().strip())
+            if defaults_path:
+                self._save_defaults_json(defaults_path)
+        except Exception as e:
+            self.append_error(f"Failed to auto-save defaults: {e}")
+        super().closeEvent(event)
+
     # ---- Actions ----
     def _pick_file(self, line_edit: QtWidgets.QLineEdit, filter_str: str):
         fn, _ = QtWidgets.QFileDialog.getOpenFileName(
