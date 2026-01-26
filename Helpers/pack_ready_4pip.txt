@@ -20,3 +20,4 @@ rsa
 scipy
 six
 tzdata
+PySide6

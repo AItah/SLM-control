@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6 import QtCore, QtWidgets
+from PySide6 import QtCore, QtGui, QtWidgets
 
 from slm_params import SlmParams, load_slm_params
 from slm_store import SlmParamsStore
@@ -13,6 +13,8 @@ DEFAULT_SLM_PARAMS = ROOT / "vendor" / "LCOS_SLM_X15213.json"
 
 
 class SlmParamsWindow(QtWidgets.QWidget):
+    visibility_changed = QtCore.Signal(bool)
+
     def __init__(self, store: SlmParamsStore, parent=None) -> None:
         super().__init__(parent)
         self._store = store
@@ -81,7 +83,8 @@ class SlmParamsWindow(QtWidgets.QWidget):
         layout.addWidget(self.lbl_status)
 
         self._wire_value_changes()
-        self._try_autoload_defaults()
+        if not self._restore_settings():
+            self._try_autoload_defaults()
 
     def _wire_value_changes(self) -> None:
         self.spin_nx.valueChanged.connect(self._push_params)
@@ -90,6 +93,51 @@ class SlmParamsWindow(QtWidgets.QWidget):
         self.dsb_py_side_m.valueChanged.connect(self._push_params)
         self.dsb_fill_factor.valueChanged.connect(self._push_params)
         self.spin_c2pi2unit.valueChanged.connect(self._push_params)
+
+    def _restore_settings(self) -> bool:
+        settings = QtCore.QSettings()
+        settings.beginGroup("slm_params_window")
+        geometry = settings.value("geometry")
+        if geometry:
+            self.restoreGeometry(geometry)
+
+        stored_path = settings.value("params_path", "")
+        if stored_path:
+            self.ed_params_path.setText(stored_path)
+            path = Path(stored_path)
+            if path.exists():
+                self._load_from_path(path, show_error=False)
+
+        has_values = settings.contains("nx")
+        if has_values:
+            self._block_push = True
+            try:
+                self.spin_nx.setValue(int(settings.value("nx", 1)))
+                self.spin_ny.setValue(int(settings.value("ny", 1)))
+                self.dsb_px_side_m.setValue(float(settings.value("px_side_m", 0.0)))
+                self.dsb_py_side_m.setValue(float(settings.value("py_side_m", 0.0)))
+                self.dsb_fill_factor.setValue(float(settings.value("fill_factor", 0.0)))
+                self.spin_c2pi2unit.setValue(int(settings.value("c2pi2unit", 1)))
+            finally:
+                self._block_push = False
+            self._push_params()
+
+        settings.endGroup()
+        return bool(stored_path) or has_values
+
+    def _save_settings(self) -> None:
+        settings = QtCore.QSettings()
+        settings.beginGroup("slm_params_window")
+        settings.setValue("geometry", self.saveGeometry())
+        settings.setValue("params_path", self.ed_params_path.text().strip())
+        settings.setValue("nx", int(self.spin_nx.value()))
+        settings.setValue("ny", int(self.spin_ny.value()))
+        settings.setValue("px_side_m", float(self.dsb_px_side_m.value()))
+        settings.setValue("py_side_m", float(self.dsb_py_side_m.value()))
+        settings.setValue("fill_factor", float(self.dsb_fill_factor.value()))
+        settings.setValue("c2pi2unit", int(self.spin_c2pi2unit.value()))
+        settings.setValue("visible", self.isVisible())
+        settings.endGroup()
 
     def _try_autoload_defaults(self) -> None:
         if DEFAULT_SLM_PARAMS.exists():
@@ -151,3 +199,21 @@ class SlmParamsWindow(QtWidgets.QWidget):
             source_path=source_path,
         )
         self._store.set_params(params)
+
+    def showEvent(self, event: QtGui.QShowEvent) -> None:
+        super().showEvent(event)
+        self.visibility_changed.emit(True)
+        self._save_settings()
+
+    def hideEvent(self, event: QtGui.QHideEvent) -> None:
+        super().hideEvent(event)
+        self.visibility_changed.emit(False)
+        self._save_settings()
+
+    def closeEvent(self, event: QtGui.QCloseEvent) -> None:
+        self._save_settings()
+        if QtCore.QCoreApplication.closingDown():
+            event.accept()
+            return
+        event.ignore()
+        self.hide()

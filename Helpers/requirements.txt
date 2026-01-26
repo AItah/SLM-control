@@ -20,3 +20,4 @@ rsa             4.9.1
 scipy           1.16.2
 six             1.17.0
 tzdata          2025.2
+PySide6

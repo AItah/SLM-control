@@ -10,6 +10,7 @@ from image_utils import exception_to_text, image_path_to_array, to_grayscale_qpi
 from slm_cls import SLM, SLMError
 from slm_params import SlmParams
 from slm_store import SlmParamsStore
+from slm_params_window import SlmParamsWindow
 
 
 class ImageViewer(QtWidgets.QDialog):
@@ -126,12 +127,19 @@ class SLMWorker(QtCore.QObject):
 
 
 class SlmControlWindow(QtWidgets.QWidget):
-    def __init__(self, store: SlmParamsStore, parent=None) -> None:
+    def __init__(
+        self,
+        store: SlmParamsStore,
+        params_window: SlmParamsWindow,
+        parent=None,
+    ) -> None:
         super().__init__(parent)
         self._store = store
+        self._params_window = params_window
         self._slm_params: SlmParams | None = None
         self.temp_threshold_c = 35.0
         self.temp_timer: Optional[QtCore.QTimer] = None
+        self._syncing_visibility = False
 
         self.setWindowTitle("SLM Control")
         self.resize(720, 520)
@@ -140,6 +148,10 @@ class SlmControlWindow(QtWidgets.QWidget):
         self._setup_worker_thread()
 
         self._store.changed.connect(self._on_params_changed)
+        self._params_window.visibility_changed.connect(
+            self._on_params_visibility_changed
+        )
+        self._restore_settings()
 
     def _build_ui(self) -> None:
         layout = QtWidgets.QVBoxLayout(self)
@@ -155,6 +167,14 @@ class SlmControlWindow(QtWidgets.QWidget):
         top.addStretch(1)
         top.addWidget(self.lbl_params)
         layout.addLayout(top)
+
+        windows_box = QtWidgets.QGroupBox("Windows")
+        windows_layout = QtWidgets.QHBoxLayout(windows_box)
+        self.chk_window_params = QtWidgets.QCheckBox("SLM Parameters")
+        self.chk_window_params.setChecked(True)
+        windows_layout.addWidget(self.chk_window_params)
+        windows_layout.addStretch(1)
+        layout.addWidget(windows_box)
 
         grid = QtWidgets.QGridLayout()
         r = 0
@@ -214,6 +234,7 @@ class SlmControlWindow(QtWidgets.QWidget):
         self.btn_check_display.clicked.connect(self._on_check_display)
         self.btn_check_fmem.clicked.connect(self._on_check_fmem)
         self.chk_watchdog.stateChanged.connect(self._on_watchdog_toggled)
+        self.chk_window_params.toggled.connect(self._on_params_window_toggled)
 
     def _setup_worker_thread(self) -> None:
         self.slm_thread = QtCore.QThread(self)
@@ -240,6 +261,59 @@ class SlmControlWindow(QtWidgets.QWidget):
             self._append_error("Load SLM parameters first.")
             return None
         return self._slm_params
+
+    def _restore_settings(self) -> None:
+        settings = QtCore.QSettings()
+        settings.beginGroup("slm_control_window")
+        geometry = settings.value("geometry")
+        if geometry:
+            self.restoreGeometry(geometry)
+
+        bmp_path = settings.value("bmp_path", "")
+        if bmp_path:
+            self.ed_current_bmp.setText(bmp_path)
+
+        self.spin_slot.setValue(int(settings.value("slot", 0)))
+        self.spin_interval.setValue(int(settings.value("watchdog_interval", 10)))
+        self.chk_watchdog.setChecked(
+            bool(settings.value("watchdog_enabled", False, bool))
+        )
+
+        params_visible = settings.value("params_window_visible", True, bool)
+        settings.endGroup()
+
+        self._set_params_window_visible(params_visible, update_checkbox=True)
+
+    def _save_settings(self) -> None:
+        settings = QtCore.QSettings()
+        settings.beginGroup("slm_control_window")
+        settings.setValue("geometry", self.saveGeometry())
+        settings.setValue("bmp_path", self.ed_current_bmp.text().strip())
+        settings.setValue("slot", int(self.spin_slot.value()))
+        settings.setValue("watchdog_enabled", self.chk_watchdog.isChecked())
+        settings.setValue("watchdog_interval", int(self.spin_interval.value()))
+        settings.setValue("params_window_visible", self.chk_window_params.isChecked())
+        settings.endGroup()
+
+    def _set_params_window_visible(self, visible: bool, update_checkbox: bool) -> None:
+        self._syncing_visibility = True
+        try:
+            if update_checkbox:
+                self.chk_window_params.blockSignals(True)
+                self.chk_window_params.setChecked(visible)
+                self.chk_window_params.blockSignals(False)
+            if visible:
+                self._params_window.show()
+                self._params_window.raise_()
+                self._params_window.activateWindow()
+            else:
+                self._params_window.hide()
+        finally:
+            self._syncing_visibility = False
+
+    def _on_params_window_toggled(self, checked: bool) -> None:
+        self._set_params_window_visible(checked, update_checkbox=False)
+        self._save_settings()
 
     def _pick_bmp(self) -> None:
         path, _ = QtWidgets.QFileDialog.getOpenFileName(
@@ -310,6 +384,18 @@ class SlmControlWindow(QtWidgets.QWidget):
         self.btn_disconnect.setEnabled(False)
         self._stop_watchdog()
 
+    def _on_params_visibility_changed(self, visible: bool) -> None:
+        if self._syncing_visibility:
+            return
+        self._syncing_visibility = True
+        try:
+            self.chk_window_params.blockSignals(True)
+            self.chk_window_params.setChecked(visible)
+            self.chk_window_params.blockSignals(False)
+        finally:
+            self._syncing_visibility = False
+        self._save_settings()
+
     def _on_watchdog_toggled(self, state: int) -> None:
         if self.chk_watchdog.isChecked():
             self._start_watchdog()
@@ -356,6 +442,7 @@ class SlmControlWindow(QtWidgets.QWidget):
         self.log.appendPlainText("ERROR: " + text)
 
     def shutdown(self) -> None:
+        self._save_settings()
         self._stop_watchdog()
         try:
             self._invoke_in_slm_thread(self.slm_worker.close)
@@ -368,5 +455,6 @@ class SlmControlWindow(QtWidgets.QWidget):
             pass
 
     def closeEvent(self, event: QtGui.QCloseEvent) -> None:
+        self._save_settings()
         self.shutdown()
         event.accept()
