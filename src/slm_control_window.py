@@ -368,11 +368,17 @@ class SlmControlWindow(QtWidgets.QWidget):
             self.ed_current_bmp.setText(path)
 
     def _invoke_in_slm_thread(self, func, *args) -> None:
+        qargs = []
+        for arg in args:
+            if isinstance(arg, np.ndarray):
+                qargs.append(QtCore.Q_ARG(object, arg))
+            else:
+                qargs.append(QtCore.Q_ARG(type(arg), arg))
         QtCore.QMetaObject.invokeMethod(
             self.slm_worker,
             func.__name__,
             QtCore.Qt.QueuedConnection,
-            *[QtCore.Q_ARG(type(arg), arg) for arg in args],
+            *qargs,
         )
 
     def _on_connect_clicked(self) -> None:
@@ -518,6 +524,15 @@ class SlmControlWindow(QtWidgets.QWidget):
     def closeEvent(self, event: QtGui.QCloseEvent) -> None:
         self._save_settings()
         self.shutdown()
+        try:
+            self._params_window.force_close()
+        except Exception:
+            pass
+        try:
+            self._vortex_window.force_close()
+        except Exception:
+            pass
+        QtCore.QCoreApplication.quit()
         event.accept()
 
     def send_mask_to_slot(self, mask_u8: np.ndarray, slot: int) -> bool:

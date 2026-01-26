@@ -35,6 +35,7 @@ class VortexWindow(QtWidgets.QWidget):
         self._slm_params: SlmParams | None = None
         self._slm_control: Optional["SlmControlWindow"] = None
         self._block_settings = False
+        self._force_close = False
 
         self.setWindowTitle("Vortex Generator")
         self.resize(620, 520)
@@ -415,8 +416,12 @@ class VortexWindow(QtWidgets.QWidget):
 
     def closeEvent(self, event: QtGui.QCloseEvent) -> None:
         self._save_settings()
-        if QtCore.QCoreApplication.closingDown():
+        if self._force_close or QtCore.QCoreApplication.closingDown():
             event.accept()
             return
         event.ignore()
         self.hide()
+
+    def force_close(self) -> None:
+        self._force_close = True
+        self.close()
