@@ -102,6 +102,20 @@ class SLMWorker(QtCore.QObject):
         except Exception as exc:
             self.failed.emit(exception_to_text(exc))
 
+    @QtCore.Slot(object, int, int, int)
+    def send_array_and_display(
+        self, arr: object, slot: int, xpix: int, ypix: int
+    ) -> None:
+        try:
+            self._guard()
+            data = np.asarray(arr, dtype=np.uint8).reshape(ypix, xpix).flatten()
+            self.slm.write_frame_array(data, xpix, ypix, slot)
+            self.status.emit(f"Wrote array to frame memory slot {slot}.")
+            self.slm.change_display_slot(slot)
+            self.status.emit(f"Display switched to slot {slot}.")
+        except Exception as exc:
+            self.failed.emit(exception_to_text(exc))
+
     @QtCore.Slot()
     def read_temperature(self) -> None:
         try:
@@ -138,6 +152,7 @@ class SLMWorker(QtCore.QObject):
 
 
 class SlmControlWindow(QtWidgets.QWidget):
+    send_mask_signal = QtCore.Signal(object, int, int, int)
     def __init__(
         self,
         store: SlmParamsStore,
@@ -153,6 +168,7 @@ class SlmControlWindow(QtWidgets.QWidget):
         self.temp_threshold_c = 35.0
         self.temp_timer: Optional[QtCore.QTimer] = None
         self._syncing_visibility = False
+        self._slm_connected = False
 
         self.setWindowTitle("SLM Control")
         self.resize(720, 520)
@@ -261,6 +277,10 @@ class SlmControlWindow(QtWidgets.QWidget):
         self.slm_worker = SLMWorker()
         self.slm_worker.moveToThread(self.slm_thread)
         self.slm_thread.start()
+
+        self.send_mask_signal.connect(
+            self.slm_worker.send_array_and_display, QtCore.Qt.QueuedConnection
+        )
 
         self.slm_worker.connected.connect(self._on_slm_connected)
         self.slm_worker.disconnected.connect(self._on_slm_disconnected)
@@ -428,6 +448,7 @@ class SlmControlWindow(QtWidgets.QWidget):
 
     def _on_slm_connected(self, msg: str) -> None:
         self._append_log(msg)
+        self._slm_connected = True
         self.btn_connect.setEnabled(False)
         self.btn_disconnect.setEnabled(True)
         if self._slm_params is None:
@@ -435,6 +456,7 @@ class SlmControlWindow(QtWidgets.QWidget):
 
     def _on_slm_disconnected(self) -> None:
         self._append_log("SLM disconnected.")
+        self._slm_connected = False
         self.btn_connect.setEnabled(True)
         self.btn_disconnect.setEnabled(False)
         self._stop_watchdog()
@@ -511,6 +533,7 @@ class SlmControlWindow(QtWidgets.QWidget):
     def shutdown(self) -> None:
         self._save_settings()
         self._stop_watchdog()
+        self._slm_connected = False
         try:
             self._invoke_in_slm_thread(self.slm_worker.close)
         except Exception:
@@ -536,6 +559,9 @@ class SlmControlWindow(QtWidgets.QWidget):
         event.accept()
 
     def send_mask_to_slot(self, mask_u8: np.ndarray, slot: int) -> bool:
+        if not self._slm_connected:
+            self._append_error("SLM is not connected.")
+            return False
         params = self._require_params()
         if params is None:
             return False
@@ -544,8 +570,5 @@ class SlmControlWindow(QtWidgets.QWidget):
                 f"Mask size {mask_u8.shape} does not match SLM {params.nx}x{params.ny}."
             )
             return False
-        self._invoke_in_slm_thread(
-            self.slm_worker.send_array_to_slot, mask_u8, slot, params.nx, params.ny
-        )
-        self._invoke_in_slm_thread(self.slm_worker.change_display_slot, slot)
+        self.send_mask_signal.emit(mask_u8, slot, params.nx, params.ny)
         return True
