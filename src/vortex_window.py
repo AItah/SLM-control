@@ -181,6 +181,55 @@ class VortexWindow(QtWidgets.QWidget):
 
         layout.addWidget(steer_group)
 
+        # Zernike section
+        zern_group = QtWidgets.QGroupBox("Zernike Corrections")
+        zern_layout = QtWidgets.QGridLayout(zern_group)
+        r = 0
+        self.chk_use_zernike = QtWidgets.QCheckBox("Enable Zernike corrections")
+        self.chk_use_zernike.setChecked(False)
+        zern_layout.addWidget(self.chk_use_zernike, r, 0, 1, 2)
+        r += 1
+
+        self.dsb_astig_v = QtWidgets.QDoubleSpinBox()
+        self.dsb_astig_v.setRange(-10.0, 10.0)
+        self.dsb_astig_v.setDecimals(4)
+        self.dsb_astig_v.setSingleStep(0.01)
+
+        self.dsb_astig_o = QtWidgets.QDoubleSpinBox()
+        self.dsb_astig_o.setRange(-10.0, 10.0)
+        self.dsb_astig_o.setDecimals(4)
+        self.dsb_astig_o.setSingleStep(0.01)
+
+        self.dsb_coma_y = QtWidgets.QDoubleSpinBox()
+        self.dsb_coma_y.setRange(-10.0, 10.0)
+        self.dsb_coma_y.setDecimals(4)
+        self.dsb_coma_y.setSingleStep(0.01)
+
+        self.dsb_coma_x = QtWidgets.QDoubleSpinBox()
+        self.dsb_coma_x.setRange(-10.0, 10.0)
+        self.dsb_coma_x.setDecimals(4)
+        self.dsb_coma_x.setSingleStep(0.01)
+
+        self.dsb_spher = QtWidgets.QDoubleSpinBox()
+        self.dsb_spher.setRange(-10.0, 10.0)
+        self.dsb_spher.setDecimals(4)
+        self.dsb_spher.setSingleStep(0.01)
+
+        zern_layout.addWidget(QtWidgets.QLabel("Astig V (c_astig_v):"), r, 0)
+        zern_layout.addWidget(self.dsb_astig_v, r, 1)
+        zern_layout.addWidget(QtWidgets.QLabel("Astig O (c_astig_o):"), r, 2)
+        zern_layout.addWidget(self.dsb_astig_o, r, 3)
+        r += 1
+        zern_layout.addWidget(QtWidgets.QLabel("Coma Y (c_coma_y):"), r, 0)
+        zern_layout.addWidget(self.dsb_coma_y, r, 1)
+        zern_layout.addWidget(QtWidgets.QLabel("Coma X (c_coma_x):"), r, 2)
+        zern_layout.addWidget(self.dsb_coma_x, r, 3)
+        r += 1
+        zern_layout.addWidget(QtWidgets.QLabel("Spherical (c_spher):"), r, 0)
+        zern_layout.addWidget(self.dsb_spher, r, 1)
+
+        layout.addWidget(zern_group)
+
         # Actions
         actions = QtWidgets.QHBoxLayout()
         self.spin_slot = QtWidgets.QSpinBox()
@@ -305,6 +354,14 @@ class VortexWindow(QtWidgets.QWidget):
                 ell=ell,
                 sft_x_m=sft_x_m,
                 sft_y_m=sft_y_m,
+                zernike_offset_x_m=sft_x_m,
+                zernike_offset_y_m=sft_y_m,
+                c_astig_v=float(self.dsb_astig_v.value()),
+                c_astig_o=float(self.dsb_astig_o.value()),
+                c_coma_y=float(self.dsb_coma_y.value()),
+                c_coma_x=float(self.dsb_coma_x.value()),
+                c_spher=float(self.dsb_spher.value()),
+                use_zernike=self.chk_use_zernike.isChecked(),
                 steer_req=steer_req,
                 use_forked=use_fork,
                 aperture_radius_m=aperture_radius_m,
@@ -322,6 +379,15 @@ class VortexWindow(QtWidgets.QWidget):
                 offset_y_mm=offset_y_mm,
                 focal_length_m=float(self.dsb_focal_m.value()),
             )
+            if self.chk_use_zernike.isChecked():
+                filename = (
+                    filename[:-4]
+                    + f"_zern_av_{self.dsb_astig_v.value():.3f}"
+                    + f"_ao_{self.dsb_astig_o.value():.3f}"
+                    + f"_cx_{self.dsb_coma_x.value():.3f}"
+                    + f"_cy_{self.dsb_coma_y.value():.3f}"
+                    + f"_s_{self.dsb_spher.value():.3f}.bmp"
+                )
 
             slot = int(self.spin_slot.value())
             if 0 <= slot <= 15:
@@ -380,6 +446,12 @@ class VortexWindow(QtWidgets.QWidget):
         self.dsb_delta_y.setValue(float(settings.value("delta_y", 0.0)))
         self.dsb_focal_m.setValue(float(settings.value("focal_m", 0.2)))
         self.spin_slot.setValue(int(settings.value("slot", -1)))
+        self.chk_use_zernike.setChecked(bool(settings.value("use_zernike", False, bool)))
+        self.dsb_astig_v.setValue(float(settings.value("astig_v", 0.0)))
+        self.dsb_astig_o.setValue(float(settings.value("astig_o", 0.0)))
+        self.dsb_coma_y.setValue(float(settings.value("coma_y", 0.0)))
+        self.dsb_coma_x.setValue(float(settings.value("coma_x", 0.0)))
+        self.dsb_spher.setValue(float(settings.value("spher", 0.0)))
         settings.endGroup()
 
     def _save_settings(self) -> None:
@@ -401,6 +473,12 @@ class VortexWindow(QtWidgets.QWidget):
         settings.setValue("delta_y", float(self.dsb_delta_y.value()))
         settings.setValue("focal_m", float(self.dsb_focal_m.value()))
         settings.setValue("slot", int(self.spin_slot.value()))
+        settings.setValue("use_zernike", self.chk_use_zernike.isChecked())
+        settings.setValue("astig_v", float(self.dsb_astig_v.value()))
+        settings.setValue("astig_o", float(self.dsb_astig_o.value()))
+        settings.setValue("coma_y", float(self.dsb_coma_y.value()))
+        settings.setValue("coma_x", float(self.dsb_coma_x.value()))
+        settings.setValue("spher", float(self.dsb_spher.value()))
         settings.setValue("visible", self.isVisible())
         settings.endGroup()
 

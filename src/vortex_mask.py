@@ -30,6 +30,9 @@ class Coordinates:
     x_mm: np.ndarray
     y_mm: np.ndarray
     center_mode: str
+    r_norm: np.ndarray
+    x_norm: np.ndarray
+    y_norm: np.ndarray
 
 
 @dataclass
@@ -74,6 +77,7 @@ def load_calibration_mask(path: str | Path) -> np.ndarray:
 def make_coordinates(
     slm: SlmParams,
     force_zero: bool = False,
+    aperture_radius_m: Optional[float] = None,
 ) -> Coordinates:
     nx, ny = slm.nx, slm.ny
     if force_zero:
@@ -91,6 +95,16 @@ def make_coordinates(
     X = xi * slm.px_side_m
     Y = yi * slm.py_side_m
 
+    if aperture_radius_m and aperture_radius_m > 0:
+        norm_radius = aperture_radius_m
+    else:
+        norm_radius = min(nx * slm.px_side_m, ny * slm.py_side_m) / 2.0
+    if norm_radius <= 0:
+        norm_radius = 1.0
+    x_norm = (X / norm_radius).astype(np.float64)
+    y_norm = (Y / norm_radius).astype(np.float64)
+    r_norm = np.hypot(x_norm, y_norm)
+
     return Coordinates(
         nx=nx,
         ny=ny,
@@ -105,6 +119,9 @@ def make_coordinates(
         x_mm=x_m * 1e3,
         y_mm=y_m * 1e3,
         center_mode=center_mode,
+        r_norm=r_norm,
+        x_norm=x_norm,
+        y_norm=y_norm,
     )
 
 
@@ -115,6 +132,28 @@ def make_vortex_phase(
         raise ValueError("ell must be a positive integer.")
     theta = np.arctan2(coords.Y - sft_y, coords.X - sft_x)
     return ell * theta
+
+
+def make_zernike_phase(
+    coords: Coordinates,
+    offset_x_m: float,
+    offset_y_m: float,
+    norm_radius_m: float,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    x = coords.X - offset_x_m
+    y = coords.Y - offset_y_m
+    norm_radius = norm_radius_m if norm_radius_m > 0 else 1.0
+    xn = x / norm_radius
+    yn = y / norm_radius
+    r2 = xn * xn + yn * yn
+
+    z_astig_v = 2.0 * xn * yn
+    z_astig_o = xn * xn - yn * yn
+    z_coma_y = (3.0 * r2 - 2.0) * yn
+    z_coma_x = (3.0 * r2 - 2.0) * xn
+    z_spher = 6.0 * r2 * r2 - 6.0 * r2 + 1.0
+
+    return z_astig_v, z_astig_o, z_coma_y, z_coma_x, z_spher
 
 
 def make_shift_phase(coords: Coordinates, fcp_x: float, fcp_y: float) -> np.ndarray:
@@ -206,13 +245,23 @@ def generate_mask(
     ell: int,
     sft_x_m: float = 0.0,
     sft_y_m: float = 0.0,
+    zernike_offset_x_m: float = 0.0,
+    zernike_offset_y_m: float = 0.0,
+    c_astig_v: float = 0.0,
+    c_astig_o: float = 0.0,
+    c_coma_y: float = 0.0,
+    c_coma_x: float = 0.0,
+    c_spher: float = 0.0,
+    use_zernike: bool = False,
     steer_req: Optional[SteeringRequest] = None,
     use_forked: bool = True,
     aperture_radius_m: Optional[float] = None,
     force_zero: bool = True,
     calib_mask: Optional[np.ndarray] = None,
 ) -> MaskResult:
-    coords = make_coordinates(slm, force_zero=force_zero)
+    coords = make_coordinates(
+        slm, force_zero=force_zero, aperture_radius_m=aperture_radius_m
+    )
 
     vortex = make_vortex_phase(coords, ell, sft_x=sft_x_m, sft_y=sft_y_m)
     if aperture_radius_m is not None:
@@ -226,7 +275,27 @@ def generate_mask(
     else:
         shift = np.zeros_like(vortex)
 
-    desired = vortex + shift
+    zernike = 0.0
+    if use_zernike:
+        z_astig_v, z_astig_o, z_coma_y, z_coma_x, z_spher = make_zernike_phase(
+            coords,
+            offset_x_m=zernike_offset_x_m,
+            offset_y_m=zernike_offset_y_m,
+            norm_radius_m=(
+                aperture_radius_m
+                if (aperture_radius_m and aperture_radius_m > 0)
+                else min(slm.nx * slm.px_side_m, slm.ny * slm.py_side_m) / 2.0
+            ),
+        )
+        zernike = (
+            c_astig_v * z_astig_v
+            + c_astig_o * z_astig_o
+            + c_coma_y * z_coma_y
+            + c_coma_x * z_coma_x
+            + c_spher * z_spher
+        )
+
+    desired = vortex + shift + zernike
     phi_wrapped = wrap_phase(desired)
     mask_u8 = phase_to_gray(phi_wrapped, slm.c2pi2unit)
 
