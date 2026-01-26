@@ -166,14 +166,17 @@ class OffsetScanWorker(QtCore.QObject):
             raise RuntimeError("ROI is empty.")
 
         roi_gray = self._to_gray(roi)
-        hole_center, ring_center = self._find_centers(roi_gray)
-        dist = math.hypot(ring_center[0] - hole_center[0], ring_center[1] - hole_center[1])
-        self.log.emit(
-            f"hole=({hole_center[0]:.1f},{hole_center[1]:.1f}) "
-            f"ring=({ring_center[0]:.1f},{ring_center[1]:.1f}) "
-            f"dist={dist:.2f}"
-        )
-        return float(dist)
+
+        if cv2 is not None:
+            try:
+                score = self._score_warp_polar(roi_gray)
+                self.log.emit(f"warpPolar score={score:.3f}")
+                return float(score)
+            except Exception as exc:
+                self.log.emit(f"warpPolar failed: {exc}; falling back to circle fit.")
+
+        score = self._score_center_distance(roi_gray)
+        return float(score)
 
     @staticmethod
     def _to_gray(roi: np.ndarray) -> np.ndarray:
@@ -182,6 +185,16 @@ class OffsetScanWorker(QtCore.QObject):
         return (
             0.299 * roi[:, :, 0] + 0.587 * roi[:, :, 1] + 0.114 * roi[:, :, 2]
         ).astype(np.float32)
+
+    def _score_center_distance(self, roi_gray: np.ndarray) -> float:
+        hole_center, ring_center = self._find_centers(roi_gray)
+        dist = math.hypot(ring_center[0] - hole_center[0], ring_center[1] - hole_center[1])
+        self.log.emit(
+            f"hole=({hole_center[0]:.1f},{hole_center[1]:.1f}) "
+            f"ring=({ring_center[0]:.1f},{ring_center[1]:.1f}) "
+            f"dist={dist:.2f}"
+        )
+        return float(dist)
 
     def _find_centers(self, roi_gray: np.ndarray) -> tuple[tuple[float, float], tuple[float, float]]:
         if cv2 is not None:
@@ -237,6 +250,41 @@ class OffsetScanWorker(QtCore.QObject):
         rx = float(xs2.mean())
         ry = float(ys2.mean())
         return (hx, hy), (rx, ry)
+
+    def _score_warp_polar(self, roi_gray: np.ndarray) -> float:
+        img = roi_gray.astype(np.float32)
+        img_min = float(np.min(img))
+        img_max = float(np.max(img))
+        if img_max <= img_min:
+            raise RuntimeError("Flat image.")
+        img = (img - img_min) / (img_max - img_min)
+        img = (img * 255.0).astype(np.uint8)
+        blur = cv2.GaussianBlur(img, (5, 5), 0)
+
+        h, w = blur.shape
+        center = (w / 2.0, h / 2.0)
+        max_r = min(center[0], center[1])
+        if max_r < 5:
+            raise RuntimeError("ROI too small.")
+
+        polar = cv2.warpPolar(
+            blur,
+            (int(max_r), 360),
+            center,
+            max_r,
+            cv2.WARP_POLAR_LINEAR,
+        )
+
+        # peaks per angle row
+        peaks = np.argmax(polar, axis=1)
+        max_per_angle = polar.max(axis=1)
+        threshold = np.percentile(max_per_angle, 25.0)
+        valid = max_per_angle >= threshold
+        if np.count_nonzero(valid) < 30:
+            raise RuntimeError("Not enough valid angles for warpPolar.")
+
+        peaks_valid = peaks[valid].astype(np.float32)
+        return float(np.std(peaks_valid))
 
     @staticmethod
     def _fit_circle(xs: np.ndarray, ys: np.ndarray) -> tuple[float, float, float]:
