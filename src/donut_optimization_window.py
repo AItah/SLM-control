@@ -8,6 +8,11 @@ from typing import Optional, Tuple
 import numpy as np
 from PySide6 import QtCore, QtWidgets
 
+try:
+    import cv2
+except Exception:
+    cv2 = None
+
 from camera_window import CameraWindow
 from vortex_window import VortexWindow
 from slm_control_window import SlmControlWindow
@@ -160,19 +165,90 @@ class OffsetScanWorker(QtCore.QObject):
         if roi.size == 0:
             raise RuntimeError("ROI is empty.")
 
-        if roi.ndim == 3:
-            roi_gray = (
-                0.299 * roi[:, :, 0] + 0.587 * roi[:, :, 1] + 0.114 * roi[:, :, 2]
-            )
-        else:
-            roi_gray = roi.astype(np.float32)
-
-        min_idx = np.argmin(roi_gray)
-        min_y, min_x = np.unravel_index(min_idx, roi_gray.shape)
-        cx = roi_gray.shape[1] / 2.0
-        cy = roi_gray.shape[0] / 2.0
-        dist = math.hypot(min_x - cx, min_y - cy)
+        roi_gray = self._to_gray(roi)
+        hole_center, ring_center = self._find_centers(roi_gray)
+        dist = math.hypot(ring_center[0] - hole_center[0], ring_center[1] - hole_center[1])
+        self.log.emit(
+            f"hole=({hole_center[0]:.1f},{hole_center[1]:.1f}) "
+            f"ring=({ring_center[0]:.1f},{ring_center[1]:.1f}) "
+            f"dist={dist:.2f}"
+        )
         return float(dist)
+
+    @staticmethod
+    def _to_gray(roi: np.ndarray) -> np.ndarray:
+        if roi.ndim == 2:
+            return roi.astype(np.float32)
+        return (
+            0.299 * roi[:, :, 0] + 0.587 * roi[:, :, 1] + 0.114 * roi[:, :, 2]
+        ).astype(np.float32)
+
+    def _find_centers(self, roi_gray: np.ndarray) -> tuple[tuple[float, float], tuple[float, float]]:
+        if cv2 is not None:
+            return self._find_centers_cv2(roi_gray)
+        return self._find_centers_numpy(roi_gray)
+
+    def _find_centers_cv2(self, roi_gray: np.ndarray) -> tuple[tuple[float, float], tuple[float, float]]:
+        img = roi_gray.astype(np.uint8)
+        blur = cv2.GaussianBlur(img, (5, 5), 0)
+
+        # Dark core (hole) detection via percentile threshold
+        thr = np.percentile(blur, 10.0)
+        dark_mask = (blur <= thr).astype(np.uint8) * 255
+        dark_mask = cv2.morphologyEx(dark_mask, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
+        contours, _ = cv2.findContours(dark_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        if not contours:
+            raise RuntimeError("Dark core not found.")
+        contour = max(contours, key=cv2.contourArea)
+        m = cv2.moments(contour)
+        if m["m00"] == 0:
+            raise RuntimeError("Dark core moment is zero.")
+        hx = m["m10"] / m["m00"]
+        hy = m["m01"] / m["m00"]
+
+        # Ring center via edge points and circle fit
+        v = np.median(blur)
+        lower = int(max(0, 0.66 * v))
+        upper = int(min(255, 1.33 * v))
+        edges = cv2.Canny(blur, lower, upper)
+        ys, xs = np.where(edges > 0)
+        if len(xs) < 30:
+            raise RuntimeError("Not enough edge points for ring fit.")
+        rx, ry, _ = self._fit_circle(xs, ys)
+
+        return (hx, hy), (rx, ry)
+
+    @staticmethod
+    def _find_centers_numpy(roi_gray: np.ndarray) -> tuple[tuple[float, float], tuple[float, float]]:
+        # Fallback: dark-core centroid and bright-ring centroid
+        thr_dark = np.percentile(roi_gray, 10.0)
+        mask_dark = roi_gray <= thr_dark
+        if not np.any(mask_dark):
+            raise RuntimeError("Dark core not found.")
+        ys, xs = np.where(mask_dark)
+        hx = float(xs.mean())
+        hy = float(ys.mean())
+
+        thr_bright = np.percentile(roi_gray, 90.0)
+        mask_bright = roi_gray >= thr_bright
+        if not np.any(mask_bright):
+            raise RuntimeError("Ring not found.")
+        ys2, xs2 = np.where(mask_bright)
+        rx = float(xs2.mean())
+        ry = float(ys2.mean())
+        return (hx, hy), (rx, ry)
+
+    @staticmethod
+    def _fit_circle(xs: np.ndarray, ys: np.ndarray) -> tuple[float, float, float]:
+        # Algebraic least squares circle fit (Kasa)
+        xs = xs.astype(np.float64)
+        ys = ys.astype(np.float64)
+        a = np.c_[2 * xs, 2 * ys, np.ones_like(xs)]
+        b = xs * xs + ys * ys
+        sol, _, _, _ = np.linalg.lstsq(a, b, rcond=None)
+        cx, cy, c = sol
+        r = math.sqrt(max(c + cx * cx + cy * cy, 0.0))
+        return float(cx), float(cy), float(r)
 
 
 class DonutOptimizationWindow(QtWidgets.QDialog):
