@@ -1,5 +1,29 @@
-from __future__ import annotations
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+SLM CGH Studio — v2
+Fixes:
+- True cancel for CGH generation (no background continuation)
+- Determinate per-iteration progress (0..num_iter)
+- "GS progress plots" window with live updates from main thread
+- Wavelength / pixel size / SLM size configurable via UI + JSON
+- Temperature threshold configurable via JSON
+"""
 
+# for optional plotting/history (now via callbacks)
+from gerchberg_saxton import run_gerchberg_saxton
+from gen_phase_map import run as run_gen_phase_map
+from slm_cls import SLM, SLMError
+from slm_mask import (
+    BeamParams,
+    SlmParams,
+    SteeringRequest,
+    generate_mask,
+    load_beam_params,
+    load_calibration_mask,
+    save_mask,
+)
+import os
 import sys
 import json
 import threading
@@ -724,8 +748,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.dsb_vortex_focal_length_m.setValue(0.2)
         self.dsb_vortex_focal_length_m.setSuffix(" m")
 
-        self.btn_vortex_generate = QtWidgets.QPushButton(
-            "Generate Vortex Mask")
+        self.btn_vortex_generate = QtWidgets.QPushButton("Generate Vortex Mask")
         self.btn_vortex_generate.clicked.connect(
             self.on_generate_vortex_clicked)
 
@@ -1375,13 +1398,11 @@ class MainWindow(QtWidgets.QMainWindow):
             self.spin_c2pi2unit.setValue(
                 int(cfg.get('c2pi2unit', cfg.get('signal_2pi', 204))))
 
-        beam_params_fp = cfg.get(
-            'beam_params_fp', str(DEFAULT_BEAM_PARAMS_JSON))
+        beam_params_fp = cfg.get('beam_params_fp', str(DEFAULT_BEAM_PARAMS_JSON))
         self.ed_beam_params.setText(beam_params_fp)
         beam_loaded = self._load_beam_params_json(Path(beam_params_fp))
         if not beam_loaded:
-            self.dsb_beam_lambda_m.setValue(
-                float(cfg.get('beam_lambda_m', 7.75e-7)))
+            self.dsb_beam_lambda_m.setValue(float(cfg.get('beam_lambda_m', 7.75e-7)))
 
         default_out_dir = str(ROOT / "masks_out")
         self.ed_vortex_calib.setText(cfg.get('vortex_calib_mask_fp', ''))
@@ -1389,10 +1410,8 @@ class MainWindow(QtWidgets.QMainWindow):
             cfg.get('vortex_output_dir', default_out_dir))
         self.ed_vortex_output_name.setText(cfg.get('vortex_output_name', ''))
         self.spin_vortex_ell.setValue(int(cfg.get('vortex_ell', 1)))
-        self.dsb_vortex_sft_x_mm.setValue(
-            float(cfg.get('vortex_sft_x_mm', 0.0)))
-        self.dsb_vortex_sft_y_mm.setValue(
-            float(cfg.get('vortex_sft_y_mm', 0.0)))
+        self.dsb_vortex_sft_x_mm.setValue(float(cfg.get('vortex_sft_x_mm', 0.0)))
+        self.dsb_vortex_sft_y_mm.setValue(float(cfg.get('vortex_sft_y_mm', 0.0)))
         self.dsb_vortex_aperture_mm.setValue(
             float(cfg.get('vortex_aperture_radius_mm', 0.0)))
         self.chk_vortex_use_forked.setChecked(
@@ -1460,8 +1479,7 @@ class MainWindow(QtWidgets.QMainWindow):
             vortex_theta_y_deg=float(self.dsb_vortex_theta_y_deg.value()),
             vortex_delta_x_mm=float(self.dsb_vortex_delta_x_mm.value()),
             vortex_delta_y_mm=float(self.dsb_vortex_delta_y_mm.value()),
-            vortex_focal_length_m=float(
-                self.dsb_vortex_focal_length_m.value()),
+            vortex_focal_length_m=float(self.dsb_vortex_focal_length_m.value()),
             size_mode=self.cmb_size_mode.currentText(),
             c2pi2unit=int(self.spin_c2pi2unit.value()),
             signal_2pi=int(self.spin_c2pi2unit.value()),
@@ -1498,17 +1516,10 @@ class MainWindow(QtWidgets.QMainWindow):
 
 def main():
     app = QtWidgets.QApplication(sys.argv)
-
-    store = SlmParamsStore()
-    params_window = SlmParamsWindow(store)
-    control_window = SlmControlWindow(store)
-
-    params_window.show()
-    control_window.show()
-
-    app.aboutToQuit.connect(control_window.shutdown)
-    return app.exec()
+    w = MainWindow()
+    w.show()
+    sys.exit(app.exec()) if QT_LIB == 'PySide6' else sys.exit(app.exec_())
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    main()
