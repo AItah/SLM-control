@@ -156,6 +156,16 @@ class SlmParamsWindow(QtWidgets.QWidget):
             return
         self._load_from_path(Path(path), show_error=True)
 
+    def ensure_loaded(self) -> bool:
+        path_text = self.ed_params_path.text().strip()
+        if not path_text:
+            return False
+        path = Path(path_text)
+        if not path.exists():
+            return False
+        self._load_from_path(path, show_error=False)
+        return True
+
     def _load_from_path(self, path: Path, show_error: bool) -> None:
         try:
             params = load_slm_params(path)

@@ -258,6 +258,8 @@ class SlmControlWindow(QtWidgets.QWidget):
 
     def _require_params(self) -> Optional[SlmParams]:
         if self._slm_params is None:
+            self._params_window.ensure_loaded()
+        if self._slm_params is None:
             self._append_error("Load SLM parameters first.")
             return None
         return self._slm_params
@@ -331,6 +333,8 @@ class SlmControlWindow(QtWidgets.QWidget):
         )
 
     def _on_connect_clicked(self) -> None:
+        if self._slm_params is None:
+            self._params_window.ensure_loaded()
         self._invoke_in_slm_thread(self.slm_worker.open)
 
     def _on_disconnect_clicked(self) -> None:
@@ -377,6 +381,8 @@ class SlmControlWindow(QtWidgets.QWidget):
         self._append_log(msg)
         self.btn_connect.setEnabled(False)
         self.btn_disconnect.setEnabled(True)
+        if self._slm_params is None:
+            self._params_window.ensure_loaded()
 
     def _on_slm_disconnected(self) -> None:
         self._append_log("SLM disconnected.")
