@@ -12,6 +12,7 @@ from slm_params import SlmParams
 from slm_store import SlmParamsStore
 from slm_params_window import SlmParamsWindow
 from vortex_window import VortexWindow
+from camera_window import CameraWindow
 
 
 class ImageViewer(QtWidgets.QDialog):
@@ -158,6 +159,7 @@ class SlmControlWindow(QtWidgets.QWidget):
         store: SlmParamsStore,
         params_window: SlmParamsWindow,
         vortex_window: VortexWindow,
+        camera_window: CameraWindow,
         parent=None,
     ) -> None:
         super().__init__(parent)
@@ -169,6 +171,7 @@ class SlmControlWindow(QtWidgets.QWidget):
         self.temp_timer: Optional[QtCore.QTimer] = None
         self._syncing_visibility = False
         self._slm_connected = False
+        self._camera_window = camera_window
 
         self.setWindowTitle("SLM Control")
         self.resize(720, 520)
@@ -182,6 +185,9 @@ class SlmControlWindow(QtWidgets.QWidget):
         )
         self._vortex_window.visibility_changed.connect(
             self._on_vortex_visibility_changed
+        )
+        self._camera_window.visibility_changed.connect(
+            self._on_camera_visibility_changed
         )
         self._restore_settings()
 
@@ -206,8 +212,11 @@ class SlmControlWindow(QtWidgets.QWidget):
         self.chk_window_params.setChecked(True)
         self.chk_window_vortex = QtWidgets.QCheckBox("Vortex Generator")
         self.chk_window_vortex.setChecked(True)
+        self.chk_window_camera = QtWidgets.QCheckBox("Camera Viewer")
+        self.chk_window_camera.setChecked(False)
         windows_layout.addWidget(self.chk_window_params)
         windows_layout.addWidget(self.chk_window_vortex)
+        windows_layout.addWidget(self.chk_window_camera)
         windows_layout.addStretch(1)
         layout.addWidget(windows_box)
 
@@ -271,6 +280,7 @@ class SlmControlWindow(QtWidgets.QWidget):
         self.chk_watchdog.stateChanged.connect(self._on_watchdog_toggled)
         self.chk_window_params.toggled.connect(self._on_params_window_toggled)
         self.chk_window_vortex.toggled.connect(self._on_vortex_window_toggled)
+        self.chk_window_camera.toggled.connect(self._on_camera_window_toggled)
 
     def _setup_worker_thread(self) -> None:
         self.slm_thread = QtCore.QThread(self)
@@ -323,10 +333,12 @@ class SlmControlWindow(QtWidgets.QWidget):
 
         params_visible = settings.value("params_window_visible", True, bool)
         vortex_visible = settings.value("vortex_window_visible", True, bool)
+        camera_visible = settings.value("camera_window_visible", False, bool)
         settings.endGroup()
 
         self._set_params_window_visible(params_visible, update_checkbox=True)
         self._set_vortex_window_visible(vortex_visible, update_checkbox=True)
+        self._set_camera_window_visible(camera_visible, update_checkbox=True)
 
     def _save_settings(self) -> None:
         settings = QtCore.QSettings()
@@ -338,6 +350,7 @@ class SlmControlWindow(QtWidgets.QWidget):
         settings.setValue("watchdog_interval", int(self.spin_interval.value()))
         settings.setValue("params_window_visible", self.chk_window_params.isChecked())
         settings.setValue("vortex_window_visible", self.chk_window_vortex.isChecked())
+        settings.setValue("camera_window_visible", self.chk_window_camera.isChecked())
         settings.endGroup()
 
     def _set_params_window_visible(self, visible: bool, update_checkbox: bool) -> None:
@@ -378,6 +391,26 @@ class SlmControlWindow(QtWidgets.QWidget):
 
     def _on_vortex_window_toggled(self, checked: bool) -> None:
         self._set_vortex_window_visible(checked, update_checkbox=False)
+        self._save_settings()
+
+    def _set_camera_window_visible(self, visible: bool, update_checkbox: bool) -> None:
+        self._syncing_visibility = True
+        try:
+            if update_checkbox:
+                self.chk_window_camera.blockSignals(True)
+                self.chk_window_camera.setChecked(visible)
+                self.chk_window_camera.blockSignals(False)
+            if visible:
+                self._camera_window.show()
+                self._camera_window.raise_()
+                self._camera_window.activateWindow()
+            else:
+                self._camera_window.hide()
+        finally:
+            self._syncing_visibility = False
+
+    def _on_camera_window_toggled(self, checked: bool) -> None:
+        self._set_camera_window_visible(checked, update_checkbox=False)
         self._save_settings()
 
     def _pick_bmp(self) -> None:
@@ -485,6 +518,18 @@ class SlmControlWindow(QtWidgets.QWidget):
             self._syncing_visibility = False
         self._save_settings()
 
+    def _on_camera_visibility_changed(self, visible: bool) -> None:
+        if self._syncing_visibility:
+            return
+        self._syncing_visibility = True
+        try:
+            self.chk_window_camera.blockSignals(True)
+            self.chk_window_camera.setChecked(visible)
+            self.chk_window_camera.blockSignals(False)
+        finally:
+            self._syncing_visibility = False
+        self._save_settings()
+
     def _on_watchdog_toggled(self, state: int) -> None:
         if self.chk_watchdog.isChecked():
             self._start_watchdog()
@@ -553,6 +598,10 @@ class SlmControlWindow(QtWidgets.QWidget):
             pass
         try:
             self._vortex_window.force_close()
+        except Exception:
+            pass
+        try:
+            self._camera_window.force_close()
         except Exception:
             pass
         QtCore.QCoreApplication.quit()
