@@ -18,11 +18,7 @@
   "vortex_steer_mode": "shift",
   "vortex_theta_x_deg": 0.0,
   "vortex_theta_y_deg": 0.0,
-<<<<<<< HEAD:src/app_defaults.json
   "vortex_delta_x_mm": -1.5,
-=======
-  "vortex_delta_x_mm": -0.3,
->>>>>>> c42423a69327412952fe528897d7ae74b513fe7d:src_old/app_defaults.json
   "vortex_delta_y_mm": 0.0,
   "vortex_focal_length_m": 2.0,
   "size_mode": "resized",
@@ -32,7 +28,7 @@
   "z": 0.4,
   "M": 1.3,
   "num_iter": 100,
-  "tilt_x_deg": -0.0015,
+  "tilt_x_deg": -0.002,
   "tilt_y_deg": 0.0,
   "slot": 6,
   "watchdog_interval_s": 10,

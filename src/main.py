@@ -7,25 +7,18 @@ import traceback
 from pathlib import Path
 from typing import Optional
 
-<<<<<<< HEAD
-from PySide6 import QtCore, QtWidgets
-=======
 import numpy as np
 from PIL import Image
->>>>>>> 7dc33732b354674e7799fee1a022f5a73154faee
+
+from slm_control_window import SlmControlWindow
+from slm_params_window import SlmParamsWindow
+from slm_store import SlmParamsStore
 
 # ---- Qt / Matplotlib glue ----
-QT_LIB = None
-try:
-    from PyQt5 import QtCore, QtGui, QtWidgets
-    from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
-    from matplotlib.figure import Figure
-    QT_LIB = 'PyQt5'
-except Exception:
-    from PySide6 import QtCore, QtGui, QtWidgets
-    from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
-    from matplotlib.figure import Figure
-    QT_LIB = 'PySide6'
+from PySide6 import QtCore, QtGui, QtWidgets
+from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
+from matplotlib.figure import Figure
+QT_LIB = 'PySide6'
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
