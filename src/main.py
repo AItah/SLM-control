@@ -13,6 +13,7 @@ from PIL import Image
 from slm_control_window import SlmControlWindow
 from slm_params_window import SlmParamsWindow
 from slm_store import SlmParamsStore
+from vortex_window import VortexWindow
 
 # ---- Qt / Matplotlib glue ----
 from PySide6 import QtCore, QtGui, QtWidgets
@@ -1500,7 +1501,9 @@ def main():
 
     store = SlmParamsStore()
     params_window = SlmParamsWindow(store)
-    control_window = SlmControlWindow(store, params_window)
+    vortex_window = VortexWindow(store, params_window)
+    control_window = SlmControlWindow(store, params_window, vortex_window)
+    vortex_window.set_slm_control(control_window)
     control_window.show()
 
     app.aboutToQuit.connect(control_window.shutdown)

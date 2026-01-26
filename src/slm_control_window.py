@@ -11,6 +11,7 @@ from slm_cls import SLM, SLMError
 from slm_params import SlmParams
 from slm_store import SlmParamsStore
 from slm_params_window import SlmParamsWindow
+from vortex_window import VortexWindow
 
 
 class ImageViewer(QtWidgets.QDialog):
@@ -91,6 +92,16 @@ class SLMWorker(QtCore.QObject):
         except Exception as exc:
             self.failed.emit(exception_to_text(exc))
 
+    @QtCore.Slot(object, int, int, int)
+    def send_array_to_slot(self, arr: object, slot: int, xpix: int, ypix: int) -> None:
+        try:
+            self._guard()
+            data = np.asarray(arr, dtype=np.uint8).reshape(ypix, xpix).flatten()
+            self.slm.write_frame_array(data, xpix, ypix, slot)
+            self.status.emit(f"Wrote array to frame memory slot {slot}.")
+        except Exception as exc:
+            self.failed.emit(exception_to_text(exc))
+
     @QtCore.Slot()
     def read_temperature(self) -> None:
         try:
@@ -131,11 +142,13 @@ class SlmControlWindow(QtWidgets.QWidget):
         self,
         store: SlmParamsStore,
         params_window: SlmParamsWindow,
+        vortex_window: VortexWindow,
         parent=None,
     ) -> None:
         super().__init__(parent)
         self._store = store
         self._params_window = params_window
+        self._vortex_window = vortex_window
         self._slm_params: SlmParams | None = None
         self.temp_threshold_c = 35.0
         self.temp_timer: Optional[QtCore.QTimer] = None
@@ -150,6 +163,9 @@ class SlmControlWindow(QtWidgets.QWidget):
         self._store.changed.connect(self._on_params_changed)
         self._params_window.visibility_changed.connect(
             self._on_params_visibility_changed
+        )
+        self._vortex_window.visibility_changed.connect(
+            self._on_vortex_visibility_changed
         )
         self._restore_settings()
 
@@ -172,7 +188,10 @@ class SlmControlWindow(QtWidgets.QWidget):
         windows_layout = QtWidgets.QHBoxLayout(windows_box)
         self.chk_window_params = QtWidgets.QCheckBox("SLM Parameters")
         self.chk_window_params.setChecked(True)
+        self.chk_window_vortex = QtWidgets.QCheckBox("Vortex Generator")
+        self.chk_window_vortex.setChecked(True)
         windows_layout.addWidget(self.chk_window_params)
+        windows_layout.addWidget(self.chk_window_vortex)
         windows_layout.addStretch(1)
         layout.addWidget(windows_box)
 
@@ -235,6 +254,7 @@ class SlmControlWindow(QtWidgets.QWidget):
         self.btn_check_fmem.clicked.connect(self._on_check_fmem)
         self.chk_watchdog.stateChanged.connect(self._on_watchdog_toggled)
         self.chk_window_params.toggled.connect(self._on_params_window_toggled)
+        self.chk_window_vortex.toggled.connect(self._on_vortex_window_toggled)
 
     def _setup_worker_thread(self) -> None:
         self.slm_thread = QtCore.QThread(self)
@@ -282,9 +302,11 @@ class SlmControlWindow(QtWidgets.QWidget):
         )
 
         params_visible = settings.value("params_window_visible", True, bool)
+        vortex_visible = settings.value("vortex_window_visible", True, bool)
         settings.endGroup()
 
         self._set_params_window_visible(params_visible, update_checkbox=True)
+        self._set_vortex_window_visible(vortex_visible, update_checkbox=True)
 
     def _save_settings(self) -> None:
         settings = QtCore.QSettings()
@@ -295,6 +317,7 @@ class SlmControlWindow(QtWidgets.QWidget):
         settings.setValue("watchdog_enabled", self.chk_watchdog.isChecked())
         settings.setValue("watchdog_interval", int(self.spin_interval.value()))
         settings.setValue("params_window_visible", self.chk_window_params.isChecked())
+        settings.setValue("vortex_window_visible", self.chk_window_vortex.isChecked())
         settings.endGroup()
 
     def _set_params_window_visible(self, visible: bool, update_checkbox: bool) -> None:
@@ -315,6 +338,26 @@ class SlmControlWindow(QtWidgets.QWidget):
 
     def _on_params_window_toggled(self, checked: bool) -> None:
         self._set_params_window_visible(checked, update_checkbox=False)
+        self._save_settings()
+
+    def _set_vortex_window_visible(self, visible: bool, update_checkbox: bool) -> None:
+        self._syncing_visibility = True
+        try:
+            if update_checkbox:
+                self.chk_window_vortex.blockSignals(True)
+                self.chk_window_vortex.setChecked(visible)
+                self.chk_window_vortex.blockSignals(False)
+            if visible:
+                self._vortex_window.show()
+                self._vortex_window.raise_()
+                self._vortex_window.activateWindow()
+            else:
+                self._vortex_window.hide()
+        finally:
+            self._syncing_visibility = False
+
+    def _on_vortex_window_toggled(self, checked: bool) -> None:
+        self._set_vortex_window_visible(checked, update_checkbox=False)
         self._save_settings()
 
     def _pick_bmp(self) -> None:
@@ -402,6 +445,18 @@ class SlmControlWindow(QtWidgets.QWidget):
             self._syncing_visibility = False
         self._save_settings()
 
+    def _on_vortex_visibility_changed(self, visible: bool) -> None:
+        if self._syncing_visibility:
+            return
+        self._syncing_visibility = True
+        try:
+            self.chk_window_vortex.blockSignals(True)
+            self.chk_window_vortex.setChecked(visible)
+            self.chk_window_vortex.blockSignals(False)
+        finally:
+            self._syncing_visibility = False
+        self._save_settings()
+
     def _on_watchdog_toggled(self, state: int) -> None:
         if self.chk_watchdog.isChecked():
             self._start_watchdog()
@@ -464,3 +519,18 @@ class SlmControlWindow(QtWidgets.QWidget):
         self._save_settings()
         self.shutdown()
         event.accept()
+
+    def send_mask_to_slot(self, mask_u8: np.ndarray, slot: int) -> bool:
+        params = self._require_params()
+        if params is None:
+            return False
+        if mask_u8.shape != (params.ny, params.nx):
+            self._append_error(
+                f"Mask size {mask_u8.shape} does not match SLM {params.nx}x{params.ny}."
+            )
+            return False
+        self._invoke_in_slm_thread(
+            self.slm_worker.send_array_to_slot, mask_u8, slot, params.nx, params.ny
+        )
+        self._invoke_in_slm_thread(self.slm_worker.change_display_slot, slot)
+        return True
