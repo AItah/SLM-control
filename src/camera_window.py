@@ -358,34 +358,48 @@ class CameraWindow(QtWidgets.QWidget):
         return super().eventFilter(obj, event)
 
     def _set_roi_from_label_rect(self, rect: QtCore.QRect) -> None:
-        pix = self.lbl_view.pixmap()
-        if pix is None or pix.isNull():
+        frame_size = self._get_frame_size()
+        if frame_size is None:
             return
+        img_w, img_h = frame_size
         label_rect = self.lbl_view.contentsRect()
-        pix_size = pix.size()
         scale = min(
-            label_rect.width() / pix_size.width(),
-            label_rect.height() / pix_size.height(),
+            label_rect.width() / img_w,
+            label_rect.height() / img_h,
         )
-        disp_w = pix_size.width() * scale
-        disp_h = pix_size.height() * scale
+        disp_w = img_w * scale
+        disp_h = img_h * scale
         x0 = label_rect.x() + (label_rect.width() - disp_w) / 2
         y0 = label_rect.y() + (label_rect.height() - disp_h) / 2
 
-        rx = max(rect.x() - x0, 0)
-        ry = max(rect.y() - y0, 0)
-        rw = min(rect.width(), disp_w - rx)
-        rh = min(rect.height(), disp_h - ry)
-        if rw <= 0 or rh <= 0:
+        left = rect.x()
+        top = rect.y()
+        right = rect.x() + rect.width()
+        bottom = rect.y() + rect.height()
+        cx0 = max(left, x0)
+        cy0 = max(top, y0)
+        cx1 = min(right, x0 + disp_w)
+        cy1 = min(bottom, y0 + disp_h)
+        if cx1 <= cx0 or cy1 <= cy0:
             return
 
-        img_x = int(rx / scale)
-        img_y = int(ry / scale)
-        img_w = int(rw / scale)
-        img_h = int(rh / scale)
+        rx = cx0 - x0
+        ry = cy0 - y0
+        rw = cx1 - cx0
+        rh = cy1 - cy0
+
+        img_x = int(round(rx / scale))
+        img_y = int(round(ry / scale))
+        img_w_roi = int(round(rw / scale))
+        img_h_roi = int(round(rh / scale))
+
+        img_x = max(0, min(img_x, img_w - 1))
+        img_y = max(0, min(img_y, img_h - 1))
+        img_w_roi = max(1, min(img_w_roi, img_w - img_x))
+        img_h_roi = max(1, min(img_h_roi, img_h - img_y))
 
         with self._roi_lock:
-            self._roi = (img_x, img_y, img_w, img_h)
+            self._roi = (img_x, img_y, img_w_roi, img_h_roi)
         self.roi_changed.emit(self._roi)
         self._append_log(f"ROI set: {self._roi}")
 
@@ -393,19 +407,19 @@ class CameraWindow(QtWidgets.QWidget):
         roi = self.get_roi()
         if roi is None:
             return
-        pix = self.lbl_view.pixmap()
-        if pix is None or pix.isNull():
+        frame_size = self._get_frame_size()
+        if frame_size is None:
             return
         if self._roi_band is None:
             return
+        img_w, img_h = frame_size
         label_rect = self.lbl_view.contentsRect()
-        pix_size = pix.size()
         scale = min(
-            label_rect.width() / pix_size.width(),
-            label_rect.height() / pix_size.height(),
+            label_rect.width() / img_w,
+            label_rect.height() / img_h,
         )
-        disp_w = pix_size.width() * scale
-        disp_h = pix_size.height() * scale
+        disp_w = img_w * scale
+        disp_h = img_h * scale
         x0 = label_rect.x() + (label_rect.width() - disp_w) / 2
         y0 = label_rect.y() + (label_rect.height() - disp_h) / 2
 
@@ -416,3 +430,10 @@ class CameraWindow(QtWidgets.QWidget):
         rh = int(img_h * scale)
         self._roi_band.setGeometry(QtCore.QRect(rx, ry, rw, rh))
         self._roi_band.show()
+
+    def _get_frame_size(self) -> Optional[Tuple[int, int]]:
+        with self._frame_lock:
+            if self._last_frame is None:
+                return None
+            h, w = self._last_frame.shape[:2]
+            return int(w), int(h)
