@@ -341,13 +341,29 @@ class OffsetScanWorker(QtCore.QObject):
         img = self._normalize_to_u8(roi_gray)
         blur = cv2.GaussianBlur(img, (5, 5), 0)
 
+        hole_center = self._safe_find_hole_center(blur)
+
         xs, ys = self._ring_edges_from_gradient(blur)
         if len(xs) >= 30:
+            if hole_center is not None:
+                filt = self._filter_edges_by_radius(xs, ys, blur, hole_center)
+                if filt is not None:
+                    xs_f, ys_f, r0 = filt
+                    if len(xs_f) >= 30:
+                        rx, ry, r = self._fit_circle(xs_f, ys_f)
+                        return rx, ry, r, (xs_f, ys_f)
             rx, ry, r = self._fit_circle(xs, ys)
             return rx, ry, r, (xs, ys)
 
         xs, ys = self._ring_edges_from_canny(blur)
         if len(xs) >= 30:
+            if hole_center is not None:
+                filt = self._filter_edges_by_radius(xs, ys, blur, hole_center)
+                if filt is not None:
+                    xs_f, ys_f, r0 = filt
+                    if len(xs_f) >= 30:
+                        rx, ry, r = self._fit_circle(xs_f, ys_f)
+                        return rx, ry, r, (xs_f, ys_f)
             rx, ry, r = self._fit_circle(xs, ys)
             return rx, ry, r, (xs, ys)
 
@@ -392,6 +408,65 @@ class OffsetScanWorker(QtCore.QObject):
         d = np.sqrt((xs - cx) ** 2 + (ys - cy) ** 2)
         r = float(np.median(d))
         return cx, cy, r
+
+    def _filter_edges_by_radius(
+        self,
+        xs: np.ndarray,
+        ys: np.ndarray,
+        blur: np.ndarray,
+        center: Tuple[float, float],
+    ) -> Optional[Tuple[np.ndarray, np.ndarray, float]]:
+        if len(xs) == 0:
+            return None
+        h, w = blur.shape
+        cx, cy = center
+        if not (0 <= cx < w and 0 <= cy < h):
+            return None
+        try:
+            r0, band = self._estimate_ring_radius(blur, center)
+        except Exception:
+            return None
+        dx = xs.astype(np.float32) - float(cx)
+        dy = ys.astype(np.float32) - float(cy)
+        r = np.sqrt(dx * dx + dy * dy)
+        mask = (r >= (r0 - band)) & (r <= (r0 + band))
+        if np.count_nonzero(mask) < 30:
+            return None
+        return xs[mask], ys[mask], r0
+
+    def _estimate_ring_radius(
+        self, img: np.ndarray, center: Tuple[float, float]
+    ) -> Tuple[float, float]:
+        # Returns (r0, band) where band is half-width for filtering
+        h, w = img.shape
+        cx, cy = center
+        if not (0 <= cx < w and 0 <= cy < h):
+            raise RuntimeError("Center outside ROI.")
+        y, x = np.indices(img.shape)
+        r = np.sqrt((x - cx) ** 2 + (y - cy) ** 2)
+        r_int = r.astype(np.int32)
+        max_r = int(r_int.max())
+        if max_r < 5:
+            raise RuntimeError("ROI too small for radial profile.")
+        tbin = np.bincount(r_int.ravel(), img.ravel().astype(np.float64))
+        nr = np.bincount(r_int.ravel())
+        radial = tbin / (nr + 1e-6)
+        min_r = max(3, int(max_r * 0.05))
+        peak_r = int(min_r + np.argmax(radial[min_r:]))
+        peak_val = radial[peak_r]
+        if peak_val <= 0:
+            raise RuntimeError("Invalid radial profile.")
+        thr = peak_val * 0.6
+        left = peak_r
+        while left > min_r and radial[left] > thr:
+            left -= 1
+        right = peak_r
+        while right < len(radial) - 1 and radial[right] > thr:
+            right += 1
+        band = max(3.0, (right - left) * 0.6)
+        if band <= 0:
+            band = max(3.0, peak_r * 0.1)
+        return float(peak_r), float(band)
 
     def _safe_find_hole_center(self, roi_gray: np.ndarray) -> Optional[Tuple[float, float]]:
         if cv2 is None:
