@@ -1506,6 +1506,7 @@ def main():
     camera_window = CameraWindow()
     control_window = SlmControlWindow(store, params_window, vortex_window, camera_window)
     vortex_window.set_slm_control(control_window)
+    vortex_window.set_camera_window(camera_window)
     control_window.show()
 
     app.aboutToQuit.connect(control_window.shutdown)

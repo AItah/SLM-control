@@ -1,6 +1,9 @@
 from __future__ import annotations
 
-from typing import Optional
+from typing import Optional, Tuple
+
+import threading
+import time
 
 import numpy as np
 from PySide6 import QtCore, QtGui, QtWidgets
@@ -82,6 +85,7 @@ class CameraWorker(QtCore.QObject):
 
 class CameraWindow(QtWidgets.QWidget):
     visibility_changed = QtCore.Signal(bool)
+    roi_changed = QtCore.Signal(object)
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -92,6 +96,15 @@ class CameraWindow(QtWidgets.QWidget):
         self._restart_timer.setSingleShot(True)
         self._restart_timer.setInterval(300)
         self._restart_timer.timeout.connect(self._restart)
+        self._frame_lock = threading.Lock()
+        self._last_frame: Optional[np.ndarray] = None
+        self._last_fmt: str = ""
+        self._last_frame_time: float = 0.0
+        self._roi_lock = threading.Lock()
+        self._roi: Optional[Tuple[int, int, int, int]] = None
+        self._roi_selecting = False
+        self._roi_start = QtCore.QPoint()
+        self._roi_band: Optional[QtWidgets.QRubberBand] = None
 
         self.setWindowTitle("Camera Viewer")
         self.resize(900, 700)
@@ -148,7 +161,9 @@ class CameraWindow(QtWidgets.QWidget):
         self.lbl_view.setAlignment(QtCore.Qt.AlignCenter)
         self.lbl_view.setMinimumSize(640, 480)
         self.lbl_view.setFrameShape(QtWidgets.QFrame.StyledPanel)
+        self.lbl_view.installEventFilter(self)
         layout.addWidget(self.lbl_view, 1)
+        self._roi_band = QtWidgets.QRubberBand(QtWidgets.QRubberBand.Rectangle, self.lbl_view)
 
         self.log = QtWidgets.QPlainTextEdit(readOnly=True)
         self.log.setMaximumBlockCount(1000)
@@ -210,6 +225,10 @@ class CameraWindow(QtWidgets.QWidget):
         self._save_settings()
 
     def _on_frame(self, frame: np.ndarray, fmt: str) -> None:
+        with self._frame_lock:
+            self._last_frame = frame.copy()
+            self._last_fmt = fmt
+            self._last_frame_time = time.monotonic()
         if frame.ndim == 2:
             qimg = _gray_to_qimage(frame)
         else:
@@ -225,6 +244,7 @@ class CameraWindow(QtWidgets.QWidget):
                 QtCore.Qt.SmoothTransformation,
             )
         )
+        self._update_roi_overlay()
 
     def _append_log(self, text: str) -> None:
         self.log.appendPlainText(text)
@@ -289,3 +309,110 @@ class CameraWindow(QtWidgets.QWidget):
     def force_close(self) -> None:
         self._force_close = True
         self.close()
+
+    def is_running(self) -> bool:
+        return self._thread is not None
+
+    def get_last_frame(self) -> Optional[np.ndarray]:
+        with self._frame_lock:
+            if self._last_frame is None:
+                return None
+            return self._last_frame.copy()
+
+    def get_last_frame_time(self) -> float:
+        with self._frame_lock:
+            return float(self._last_frame_time)
+
+    def begin_roi_selection(self) -> None:
+        if self._thread is None:
+            self._append_error("Camera is not running.")
+            return
+        self._roi_selecting = True
+        self._append_log("Drag to select ROI on the image.")
+
+    def get_roi(self) -> Optional[Tuple[int, int, int, int]]:
+        with self._roi_lock:
+            return self._roi
+
+    def eventFilter(self, obj, event) -> bool:
+        if obj is self.lbl_view and self._roi_selecting:
+            if event.type() == QtCore.QEvent.MouseButtonPress:
+                self._roi_start = event.position().toPoint()
+                if self._roi_band is not None:
+                    self._roi_band.setGeometry(QtCore.QRect(self._roi_start, QtCore.QSize()))
+                    self._roi_band.show()
+                return True
+            if event.type() == QtCore.QEvent.MouseMove:
+                if not self._roi_start.isNull():
+                    rect = QtCore.QRect(self._roi_start, event.position().toPoint()).normalized()
+                    if self._roi_band is not None:
+                        self._roi_band.setGeometry(rect)
+                return True
+            if event.type() == QtCore.QEvent.MouseButtonRelease:
+                rect = self._roi_band.geometry() if self._roi_band is not None else QtCore.QRect()
+                self._roi_selecting = False
+                self._set_roi_from_label_rect(rect)
+                if self._roi_band is not None:
+                    self._roi_band.hide()
+                return True
+        return super().eventFilter(obj, event)
+
+    def _set_roi_from_label_rect(self, rect: QtCore.QRect) -> None:
+        pix = self.lbl_view.pixmap()
+        if pix is None or pix.isNull():
+            return
+        label_rect = self.lbl_view.contentsRect()
+        pix_size = pix.size()
+        scale = min(
+            label_rect.width() / pix_size.width(),
+            label_rect.height() / pix_size.height(),
+        )
+        disp_w = pix_size.width() * scale
+        disp_h = pix_size.height() * scale
+        x0 = label_rect.x() + (label_rect.width() - disp_w) / 2
+        y0 = label_rect.y() + (label_rect.height() - disp_h) / 2
+
+        rx = max(rect.x() - x0, 0)
+        ry = max(rect.y() - y0, 0)
+        rw = min(rect.width(), disp_w - rx)
+        rh = min(rect.height(), disp_h - ry)
+        if rw <= 0 or rh <= 0:
+            return
+
+        img_x = int(rx / scale)
+        img_y = int(ry / scale)
+        img_w = int(rw / scale)
+        img_h = int(rh / scale)
+
+        with self._roi_lock:
+            self._roi = (img_x, img_y, img_w, img_h)
+        self.roi_changed.emit(self._roi)
+        self._append_log(f"ROI set: {self._roi}")
+
+    def _update_roi_overlay(self) -> None:
+        roi = self.get_roi()
+        if roi is None:
+            return
+        pix = self.lbl_view.pixmap()
+        if pix is None or pix.isNull():
+            return
+        if self._roi_band is None:
+            return
+        label_rect = self.lbl_view.contentsRect()
+        pix_size = pix.size()
+        scale = min(
+            label_rect.width() / pix_size.width(),
+            label_rect.height() / pix_size.height(),
+        )
+        disp_w = pix_size.width() * scale
+        disp_h = pix_size.height() * scale
+        x0 = label_rect.x() + (label_rect.width() - disp_w) / 2
+        y0 = label_rect.y() + (label_rect.height() - disp_h) / 2
+
+        img_x, img_y, img_w, img_h = roi
+        rx = int(x0 + img_x * scale)
+        ry = int(y0 + img_y * scale)
+        rw = int(img_w * scale)
+        rh = int(img_h * scale)
+        self._roi_band.setGeometry(QtCore.QRect(rx, ry, rw, rh))
+        self._roi_band.show()

@@ -15,6 +15,7 @@ from vortex_mask import BeamParams, SteeringRequest, generate_mask, load_calibra
 
 if TYPE_CHECKING:
     from slm_control_window import SlmControlWindow
+    from donut_optimization_window import DonutOptimizationWindow
 
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_OUT_DIR = ROOT / "out_mask"
@@ -34,8 +35,10 @@ class VortexWindow(QtWidgets.QWidget):
         self._params_window = params_window
         self._slm_params: SlmParams | None = None
         self._slm_control: Optional["SlmControlWindow"] = None
+        self._camera_window = None
         self._block_settings = False
         self._force_close = False
+        self._donut_window: Optional["DonutOptimizationWindow"] = None
 
         self.setWindowTitle("Vortex Generator")
         self.resize(620, 520)
@@ -48,6 +51,9 @@ class VortexWindow(QtWidgets.QWidget):
 
     def set_slm_control(self, control: "SlmControlWindow") -> None:
         self._slm_control = control
+
+    def set_camera_window(self, camera_window) -> None:
+        self._camera_window = camera_window
 
     def _build_ui(self) -> None:
         layout = QtWidgets.QVBoxLayout(self)
@@ -249,6 +255,10 @@ class VortexWindow(QtWidgets.QWidget):
         self.log.setPlaceholderText("Vortex status messages appear here...")
         layout.addWidget(self.log, 1)
 
+        self.btn_optimize = QtWidgets.QPushButton("Donut Optimization...")
+        self.btn_optimize.clicked.connect(self._open_donut_opt)
+        layout.addWidget(self.btn_optimize, 0)
+
     def _on_params_changed(self, params: SlmParams) -> None:
         self._slm_params = params
         self.lbl_params.setText(
@@ -307,87 +317,8 @@ class VortexWindow(QtWidgets.QWidget):
 
     def _on_generate(self) -> None:
         try:
-            slm = self._ensure_params()
-            if slm is None:
-                return
-
-            wavelength_nm = float(self.dsb_wavelength_nm.value())
-            beam = BeamParams(lambda_m=wavelength_nm * 1e-9)
-
-            ell = int(self.spin_ell.value())
-            offset_x_mm = float(self.dsb_offset_x_mm.value())
-            offset_y_mm = float(self.dsb_offset_y_mm.value())
-            sft_x_m = offset_x_mm * 1e-3
-            sft_y_m = offset_y_mm * 1e-3
-
-            aperture_radius_m = None
-            aperture_mm = float(self.dsb_aperture_mm.value())
-            if aperture_mm > 0:
-                aperture_radius_m = aperture_mm * 1e-3
-
-            use_fork = self.chk_use_fork.isChecked()
-            force_zero = self.chk_force_zero.isChecked()
-            steer_req = None
-            if use_fork:
-                mode = self.cmb_steer_mode.currentText()
-                if mode == "angle":
-                    steer_req = SteeringRequest(
-                        theta_x_deg=float(self.dsb_theta_x.value()),
-                        theta_y_deg=float(self.dsb_theta_y.value()),
-                        focal_length_m=float(self.dsb_focal_m.value()),
-                    )
-                elif mode == "shift":
-                    steer_req = SteeringRequest(
-                        delta_x_mm=float(self.dsb_delta_x.value()),
-                        delta_y_mm=float(self.dsb_delta_y.value()),
-                        focal_length_m=float(self.dsb_focal_m.value()),
-                    )
-
-            calib_mask = None
-            calib_path = self.ed_calib.text().strip()
-            if calib_path:
-                calib_mask = load_calibration_mask(calib_path)
-
-            result = generate_mask(
-                slm=slm,
-                beam=beam,
-                ell=ell,
-                sft_x_m=sft_x_m,
-                sft_y_m=sft_y_m,
-                zernike_offset_x_m=sft_x_m,
-                zernike_offset_y_m=sft_y_m,
-                c_astig_v=float(self.dsb_astig_v.value()),
-                c_astig_o=float(self.dsb_astig_o.value()),
-                c_coma_y=float(self.dsb_coma_y.value()),
-                c_coma_x=float(self.dsb_coma_x.value()),
-                c_spher=float(self.dsb_spher.value()),
-                use_zernike=self.chk_use_zernike.isChecked(),
-                steer_req=steer_req,
-                use_forked=use_fork,
-                aperture_radius_m=aperture_radius_m,
-                force_zero=force_zero,
-                calib_mask=calib_mask,
-            )
-
-            filename = self._format_filename(
-                use_forked=use_fork,
-                ell=ell,
-                slm=slm,
-                steer_req=steer_req,
-                steer_result=result.steer,
-                offset_x_mm=offset_x_mm,
-                offset_y_mm=offset_y_mm,
-                focal_length_m=float(self.dsb_focal_m.value()),
-            )
-            if self.chk_use_zernike.isChecked():
-                filename = (
-                    filename[:-4]
-                    + f"_zern_av_{self.dsb_astig_v.value():.3f}"
-                    + f"_ao_{self.dsb_astig_o.value():.3f}"
-                    + f"_cx_{self.dsb_coma_x.value():.3f}"
-                    + f"_cy_{self.dsb_coma_y.value():.3f}"
-                    + f"_s_{self.dsb_spher.value():.3f}.bmp"
-                )
+            result, filename = self._build_mask_from_ui()
+            filename = self._append_zernike_to_filename(filename)
 
             slot = int(self.spin_slot.value())
             if 0 <= slot <= 15:
@@ -417,6 +348,127 @@ class VortexWindow(QtWidgets.QWidget):
             self._append_log(f"Vortex mask saved: {save_path}")
         except Exception as exc:
             self._append_error(exception_to_text(exc))
+
+    def build_mask(self, offset_x_mm: float, offset_y_mm: float) -> np.ndarray:
+        result, _ = self._build_mask_from_ui(offset_x_mm, offset_y_mm)
+        return result.mask_u8
+
+    def get_offsets_mm(self) -> tuple[float, float]:
+        return float(self.dsb_offset_x_mm.value()), float(self.dsb_offset_y_mm.value())
+
+    def set_offsets_mm(self, x_mm: float, y_mm: float) -> None:
+        self.dsb_offset_x_mm.setValue(float(x_mm))
+        self.dsb_offset_y_mm.setValue(float(y_mm))
+
+    def _build_mask_from_ui(
+        self, offset_x_mm: Optional[float] = None, offset_y_mm: Optional[float] = None
+    ):
+        slm = self._ensure_params()
+        if slm is None:
+            raise RuntimeError("SLM parameters not loaded.")
+
+        wavelength_nm = float(self.dsb_wavelength_nm.value())
+        beam = BeamParams(lambda_m=wavelength_nm * 1e-9)
+
+        ell = int(self.spin_ell.value())
+        off_x = (
+            float(self.dsb_offset_x_mm.value())
+            if offset_x_mm is None
+            else float(offset_x_mm)
+        )
+        off_y = (
+            float(self.dsb_offset_y_mm.value())
+            if offset_y_mm is None
+            else float(offset_y_mm)
+        )
+        sft_x_m = off_x * 1e-3
+        sft_y_m = off_y * 1e-3
+
+        aperture_radius_m = None
+        aperture_mm = float(self.dsb_aperture_mm.value())
+        if aperture_mm > 0:
+            aperture_radius_m = aperture_mm * 1e-3
+
+        use_fork = self.chk_use_fork.isChecked()
+        force_zero = self.chk_force_zero.isChecked()
+        steer_req = None
+        if use_fork:
+            mode = self.cmb_steer_mode.currentText()
+            if mode == "angle":
+                steer_req = SteeringRequest(
+                    theta_x_deg=float(self.dsb_theta_x.value()),
+                    theta_y_deg=float(self.dsb_theta_y.value()),
+                    focal_length_m=float(self.dsb_focal_m.value()),
+                )
+            elif mode == "shift":
+                steer_req = SteeringRequest(
+                    delta_x_mm=float(self.dsb_delta_x.value()),
+                    delta_y_mm=float(self.dsb_delta_y.value()),
+                    focal_length_m=float(self.dsb_focal_m.value()),
+                )
+
+        calib_mask = None
+        calib_path = self.ed_calib.text().strip()
+        if calib_path:
+            calib_mask = load_calibration_mask(calib_path)
+
+        result = generate_mask(
+            slm=slm,
+            beam=beam,
+            ell=ell,
+            sft_x_m=sft_x_m,
+            sft_y_m=sft_y_m,
+            zernike_offset_x_m=sft_x_m,
+            zernike_offset_y_m=sft_y_m,
+            c_astig_v=float(self.dsb_astig_v.value()),
+            c_astig_o=float(self.dsb_astig_o.value()),
+            c_coma_y=float(self.dsb_coma_y.value()),
+            c_coma_x=float(self.dsb_coma_x.value()),
+            c_spher=float(self.dsb_spher.value()),
+            use_zernike=self.chk_use_zernike.isChecked(),
+            steer_req=steer_req,
+            use_forked=use_fork,
+            aperture_radius_m=aperture_radius_m,
+            force_zero=force_zero,
+            calib_mask=calib_mask,
+        )
+
+        filename = self._format_filename(
+            use_forked=use_fork,
+            ell=ell,
+            slm=slm,
+            steer_req=steer_req,
+            steer_result=result.steer,
+            offset_x_mm=off_x,
+            offset_y_mm=off_y,
+            focal_length_m=float(self.dsb_focal_m.value()),
+        )
+        return result, filename
+
+    def _append_zernike_to_filename(self, filename: str) -> str:
+        if not self.chk_use_zernike.isChecked():
+            return filename
+        return (
+            filename[:-4]
+            + f"_zern_av_{self.dsb_astig_v.value():.3f}"
+            + f"_ao_{self.dsb_astig_o.value():.3f}"
+            + f"_cx_{self.dsb_coma_x.value():.3f}"
+            + f"_cy_{self.dsb_coma_y.value():.3f}"
+            + f"_s_{self.dsb_spher.value():.3f}.bmp"
+        )
+
+    def _open_donut_opt(self) -> None:
+        if self._slm_control is None or self._camera_window is None:
+            self._append_error("Camera and SLM control must be available.")
+            return
+        if self._donut_window is None:
+            from donut_optimization_window import DonutOptimizationWindow
+            self._donut_window = DonutOptimizationWindow(
+                self, self._slm_control, self._camera_window, self
+            )
+        self._donut_window.show()
+        self._donut_window.raise_()
+        self._donut_window.activateWindow()
 
     def _append_log(self, text: str) -> None:
         self.log.appendPlainText(text)
