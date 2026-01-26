@@ -168,18 +168,44 @@ class OffsetScanWorker(QtCore.QObject):
             raise RuntimeError("ROI is empty.")
 
         roi_gray = self._to_gray(roi)
+        debug_roi = None
+        polar = None
+        peaks = None
+        valid = None
 
         if cv2 is not None:
             try:
-                score, polar, peaks, valid = self._score_warp_polar(roi_gray)
+                ring_center, ring_r = self._find_ring_cv2(roi_gray)
+                score, polar, peaks, valid = self._score_warp_polar(roi_gray, ring_center)
                 if self._settings.debug_enabled:
-                    self.debug_data.emit(roi_gray, polar, peaks, valid)
+                    hole_center = self._safe_find_hole_center(roi_gray)
+                    debug_roi = self._draw_overlay(roi_gray, ring_center, ring_r, hole_center)
+                    self.debug_data.emit(debug_roi, polar, peaks, valid)
                 self.log.emit(f"warpPolar score={score:.3f}")
                 return float(score)
             except Exception as exc:
                 self.log.emit(f"warpPolar failed: {exc}; falling back to circle fit.")
+                if self._settings.debug_enabled:
+                    try:
+                        ring_center, ring_r = self._find_ring_cv2(roi_gray)
+                    except Exception:
+                        ring_center, ring_r = None, None
+                    hole_center = self._safe_find_hole_center(roi_gray)
+                    debug_roi = self._draw_overlay(roi_gray, ring_center, ring_r, hole_center)
+                    self.debug_data.emit(debug_roi, polar, peaks, valid)
 
         score = self._score_center_distance(roi_gray)
+        if self._settings.debug_enabled:
+            if cv2 is not None:
+                try:
+                    ring_center, ring_r = self._find_ring_cv2(roi_gray)
+                except Exception:
+                    ring_center, ring_r = None, None
+                hole_center = self._safe_find_hole_center(roi_gray)
+                debug_roi = self._draw_overlay(roi_gray, ring_center, ring_r, hole_center)
+                self.debug_data.emit(debug_roi, polar, peaks, valid)
+            else:
+                self.debug_data.emit(roi_gray, polar, peaks, valid)
         return float(score)
 
     @staticmethod
@@ -206,34 +232,9 @@ class OffsetScanWorker(QtCore.QObject):
         return self._find_centers_numpy(roi_gray)
 
     def _find_centers_cv2(self, roi_gray: np.ndarray) -> tuple[tuple[float, float], tuple[float, float]]:
-        img = roi_gray.astype(np.uint8)
-        blur = cv2.GaussianBlur(img, (5, 5), 0)
-
-        # Dark core (hole) detection via percentile threshold
-        thr = np.percentile(blur, 10.0)
-        dark_mask = (blur <= thr).astype(np.uint8) * 255
-        dark_mask = cv2.morphologyEx(dark_mask, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
-        contours, _ = cv2.findContours(dark_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        if not contours:
-            raise RuntimeError("Dark core not found.")
-        contour = max(contours, key=cv2.contourArea)
-        m = cv2.moments(contour)
-        if m["m00"] == 0:
-            raise RuntimeError("Dark core moment is zero.")
-        hx = m["m10"] / m["m00"]
-        hy = m["m01"] / m["m00"]
-
-        # Ring center via edge points and circle fit
-        v = np.median(blur)
-        lower = int(max(0, 0.66 * v))
-        upper = int(min(255, 1.33 * v))
-        edges = cv2.Canny(blur, lower, upper)
-        ys, xs = np.where(edges > 0)
-        if len(xs) < 30:
-            raise RuntimeError("Not enough edge points for ring fit.")
-        rx, ry, _ = self._fit_circle(xs, ys)
-
-        return (hx, hy), (rx, ry)
+        hole_center = self._find_hole_center_cv2(roi_gray)
+        rx, ry, _ = self._find_ring_cv2(roi_gray)
+        return hole_center, (rx, ry)
 
     @staticmethod
     def _find_centers_numpy(roi_gray: np.ndarray) -> tuple[tuple[float, float], tuple[float, float]]:
@@ -256,7 +257,7 @@ class OffsetScanWorker(QtCore.QObject):
         return (hx, hy), (rx, ry)
 
     def _score_warp_polar(
-        self, roi_gray: np.ndarray
+        self, roi_gray: np.ndarray, center: Tuple[float, float]
     ) -> tuple[float, np.ndarray, np.ndarray, np.ndarray]:
         img = roi_gray.astype(np.float32)
         img_min = float(np.min(img))
@@ -268,15 +269,17 @@ class OffsetScanWorker(QtCore.QObject):
         blur = cv2.GaussianBlur(img, (5, 5), 0)
 
         h, w = blur.shape
-        center = (w / 2.0, h / 2.0)
-        max_r = min(center[0], center[1])
+        cx, cy = center
+        if not (0 <= cx < w and 0 <= cy < h):
+            cx, cy = w / 2.0, h / 2.0
+        max_r = min(cx, cy, (w - 1) - cx, (h - 1) - cy)
         if max_r < 5:
             raise RuntimeError("ROI too small.")
 
         polar = cv2.warpPolar(
             blur,
             (int(max_r), 360),
-            center,
+            (float(cx), float(cy)),
             max_r,
             cv2.WARP_POLAR_LINEAR,
         )
@@ -291,6 +294,74 @@ class OffsetScanWorker(QtCore.QObject):
 
         peaks_valid = peaks[valid].astype(np.float32)
         return float(np.std(peaks_valid)), polar, peaks, valid
+
+    @staticmethod
+    def _normalize_to_u8(img: np.ndarray) -> np.ndarray:
+        if img.dtype == np.uint8:
+            return img
+        img_min = float(np.min(img))
+        img_max = float(np.max(img))
+        if img_max <= img_min:
+            return np.zeros_like(img, dtype=np.uint8)
+        return ((img - img_min) / (img_max - img_min) * 255.0).astype(np.uint8)
+
+    def _find_hole_center_cv2(self, roi_gray: np.ndarray) -> tuple[float, float]:
+        img = self._normalize_to_u8(roi_gray)
+        blur = cv2.GaussianBlur(img, (5, 5), 0)
+        thr = np.percentile(blur, 10.0)
+        dark_mask = (blur <= thr).astype(np.uint8) * 255
+        dark_mask = cv2.morphologyEx(dark_mask, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
+        contours, _ = cv2.findContours(dark_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        if not contours:
+            raise RuntimeError("Dark core not found.")
+        contour = max(contours, key=cv2.contourArea)
+        m = cv2.moments(contour)
+        if m["m00"] == 0:
+            raise RuntimeError("Dark core moment is zero.")
+        hx = m["m10"] / m["m00"]
+        hy = m["m01"] / m["m00"]
+        return float(hx), float(hy)
+
+    def _find_ring_cv2(self, roi_gray: np.ndarray) -> tuple[float, float, float]:
+        img = self._normalize_to_u8(roi_gray)
+        blur = cv2.GaussianBlur(img, (5, 5), 0)
+        v = np.median(blur)
+        lower = int(max(0, 0.66 * v))
+        upper = int(min(255, 1.33 * v))
+        edges = cv2.Canny(blur, lower, upper)
+        ys, xs = np.where(edges > 0)
+        if len(xs) < 30:
+            raise RuntimeError("Not enough edge points for ring fit.")
+        rx, ry, r = self._fit_circle(xs, ys)
+        return rx, ry, r
+
+    def _safe_find_hole_center(self, roi_gray: np.ndarray) -> Optional[Tuple[float, float]]:
+        if cv2 is None:
+            return None
+        try:
+            return self._find_hole_center_cv2(roi_gray)
+        except Exception:
+            return None
+
+    def _draw_overlay(
+        self,
+        roi_gray: np.ndarray,
+        ring_center: Optional[Tuple[float, float]],
+        ring_r: Optional[float],
+        hole_center: Optional[Tuple[float, float]],
+    ) -> np.ndarray:
+        base = self._normalize_to_u8(roi_gray)
+        if cv2 is None:
+            return base
+        color = cv2.cvtColor(base, cv2.COLOR_GRAY2BGR)
+        if ring_center is not None and ring_r is not None:
+            cx, cy = int(round(ring_center[0])), int(round(ring_center[1]))
+            cv2.circle(color, (cx, cy), int(round(ring_r)), (0, 255, 0), 1)
+            cv2.drawMarker(color, (cx, cy), (255, 0, 0), markerType=cv2.MARKER_CROSS)
+        if hole_center is not None:
+            hx, hy = int(round(hole_center[0])), int(round(hole_center[1]))
+            cv2.drawMarker(color, (hx, hy), (0, 0, 255), markerType=cv2.MARKER_CROSS)
+        return color
 
     @staticmethod
     def _fit_circle(xs: np.ndarray, ys: np.ndarray) -> tuple[float, float, float]:
@@ -342,8 +413,8 @@ class DebugWindow(QtWidgets.QDialog):
     def update_views(
         self, roi_gray: np.ndarray, polar: np.ndarray, peaks: np.ndarray, valid: np.ndarray
     ) -> None:
-        self._roi_pixmap = self._gray_to_pixmap(roi_gray)
-        self._polar_pixmap = self._gray_to_pixmap(polar)
+        self._roi_pixmap = self._gray_to_pixmap(roi_gray) if roi_gray is not None else None
+        self._polar_pixmap = self._gray_to_pixmap(polar) if polar is not None else None
         self._peaks_pixmap = self._plot_peaks(peaks, valid)
         self._apply_scaled()
 
@@ -353,6 +424,8 @@ class DebugWindow(QtWidgets.QDialog):
             self.lbl_stats.setText(
                 f"Angles: {len(peaks)} | Valid: {valid_count} | Peaks std: {std:.3f}"
             )
+        else:
+            self.lbl_stats.setText("No peaks data.")
 
     def resizeEvent(self, event: QtGui.QResizeEvent) -> None:
         super().resizeEvent(event)
@@ -361,10 +434,16 @@ class DebugWindow(QtWidgets.QDialog):
     def _apply_scaled(self) -> None:
         if self._roi_pixmap is not None:
             self.lbl_roi.setPixmap(self._scaled(self._roi_pixmap, self.lbl_roi))
+        else:
+            self.lbl_roi.clear()
         if self._polar_pixmap is not None:
             self.lbl_polar.setPixmap(self._scaled(self._polar_pixmap, self.lbl_polar))
+        else:
+            self.lbl_polar.clear()
         if self._peaks_pixmap is not None:
             self.lbl_peaks.setPixmap(self._scaled(self._peaks_pixmap, self.lbl_peaks))
+        else:
+            self.lbl_peaks.clear()
 
     @staticmethod
     def _scaled(pix: QtGui.QPixmap, label: QtWidgets.QLabel) -> QtGui.QPixmap:
@@ -374,6 +453,20 @@ class DebugWindow(QtWidgets.QDialog):
 
     @staticmethod
     def _gray_to_pixmap(arr: np.ndarray) -> QtGui.QPixmap:
+        if arr.ndim == 3 and arr.shape[2] == 3:
+            if arr.dtype != np.uint8:
+                arr_min = float(np.min(arr))
+                arr_max = float(np.max(arr))
+                if arr_max <= arr_min:
+                    arr = np.zeros_like(arr, dtype=np.uint8)
+                else:
+                    arr = ((arr - arr_min) / (arr_max - arr_min) * 255.0).astype(np.uint8)
+            arr = np.ascontiguousarray(arr)
+            h, w, _ = arr.shape
+            fmt = QtGui.QImage.Format_BGR888
+            qimg = QtGui.QImage(arr.data, w, h, w * 3, fmt)
+            return QtGui.QPixmap.fromImage(qimg.copy())
+
         if arr.ndim != 2:
             arr = arr[:, :, 0]
         if arr.dtype != np.uint8:
