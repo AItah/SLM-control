@@ -479,11 +479,11 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.dsb_tilt_x = QtWidgets.QDoubleSpinBox()
         self.dsb_tilt_x.setRange(-89.0, 89.0)
-        self.dsb_tilt_x.setDecimals(3)
+        self.dsb_tilt_x.setDecimals(7)
         self.dsb_tilt_x.setSuffix(" °")
         self.dsb_tilt_y = QtWidgets.QDoubleSpinBox()
         self.dsb_tilt_y.setRange(-89.0, 89.0)
-        self.dsb_tilt_y.setDecimals(3)
+        self.dsb_tilt_y.setDecimals(7)
         self.dsb_tilt_y.setSuffix(" °")
 
         # Options
@@ -748,7 +748,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.dsb_vortex_focal_length_m.setValue(0.2)
         self.dsb_vortex_focal_length_m.setSuffix(" m")
 
-        self.btn_vortex_generate = QtWidgets.QPushButton("Generate Vortex Mask")
+        self.btn_vortex_generate = QtWidgets.QPushButton(
+            "Generate Vortex Mask")
         self.btn_vortex_generate.clicked.connect(
             self.on_generate_vortex_clicked)
 
@@ -1398,11 +1399,13 @@ class MainWindow(QtWidgets.QMainWindow):
             self.spin_c2pi2unit.setValue(
                 int(cfg.get('c2pi2unit', cfg.get('signal_2pi', 204))))
 
-        beam_params_fp = cfg.get('beam_params_fp', str(DEFAULT_BEAM_PARAMS_JSON))
+        beam_params_fp = cfg.get(
+            'beam_params_fp', str(DEFAULT_BEAM_PARAMS_JSON))
         self.ed_beam_params.setText(beam_params_fp)
         beam_loaded = self._load_beam_params_json(Path(beam_params_fp))
         if not beam_loaded:
-            self.dsb_beam_lambda_m.setValue(float(cfg.get('beam_lambda_m', 7.75e-7)))
+            self.dsb_beam_lambda_m.setValue(
+                float(cfg.get('beam_lambda_m', 7.75e-7)))
 
         default_out_dir = str(ROOT / "masks_out")
         self.ed_vortex_calib.setText(cfg.get('vortex_calib_mask_fp', ''))
@@ -1410,8 +1413,10 @@ class MainWindow(QtWidgets.QMainWindow):
             cfg.get('vortex_output_dir', default_out_dir))
         self.ed_vortex_output_name.setText(cfg.get('vortex_output_name', ''))
         self.spin_vortex_ell.setValue(int(cfg.get('vortex_ell', 1)))
-        self.dsb_vortex_sft_x_mm.setValue(float(cfg.get('vortex_sft_x_mm', 0.0)))
-        self.dsb_vortex_sft_y_mm.setValue(float(cfg.get('vortex_sft_y_mm', 0.0)))
+        self.dsb_vortex_sft_x_mm.setValue(
+            float(cfg.get('vortex_sft_x_mm', 0.0)))
+        self.dsb_vortex_sft_y_mm.setValue(
+            float(cfg.get('vortex_sft_y_mm', 0.0)))
         self.dsb_vortex_aperture_mm.setValue(
             float(cfg.get('vortex_aperture_radius_mm', 0.0)))
         self.chk_vortex_use_forked.setChecked(
@@ -1479,7 +1484,8 @@ class MainWindow(QtWidgets.QMainWindow):
             vortex_theta_y_deg=float(self.dsb_vortex_theta_y_deg.value()),
             vortex_delta_x_mm=float(self.dsb_vortex_delta_x_mm.value()),
             vortex_delta_y_mm=float(self.dsb_vortex_delta_y_mm.value()),
-            vortex_focal_length_m=float(self.dsb_vortex_focal_length_m.value()),
+            vortex_focal_length_m=float(
+                self.dsb_vortex_focal_length_m.value()),
             size_mode=self.cmb_size_mode.currentText(),
             c2pi2unit=int(self.spin_c2pi2unit.value()),
             signal_2pi=int(self.spin_c2pi2unit.value()),
