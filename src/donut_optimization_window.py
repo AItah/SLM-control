@@ -31,6 +31,7 @@ class ScanSettings:
     refine_y_step_mm: float
     settle_ms: int
     slot: int
+    debug_enabled: bool
 
 
 class OffsetScanWorker(QtCore.QObject):
@@ -38,6 +39,7 @@ class OffsetScanWorker(QtCore.QObject):
     progress = QtCore.Signal(int, int)
     finished = QtCore.Signal(float, float)
     failed = QtCore.Signal(str)
+    debug_data = QtCore.Signal(object, object, object, object)
 
     def __init__(
         self,
@@ -169,7 +171,9 @@ class OffsetScanWorker(QtCore.QObject):
 
         if cv2 is not None:
             try:
-                score = self._score_warp_polar(roi_gray)
+                score, polar, peaks, valid = self._score_warp_polar(roi_gray)
+                if self._settings.debug_enabled:
+                    self.debug_data.emit(roi_gray, polar, peaks, valid)
                 self.log.emit(f"warpPolar score={score:.3f}")
                 return float(score)
             except Exception as exc:
@@ -251,7 +255,9 @@ class OffsetScanWorker(QtCore.QObject):
         ry = float(ys2.mean())
         return (hx, hy), (rx, ry)
 
-    def _score_warp_polar(self, roi_gray: np.ndarray) -> float:
+    def _score_warp_polar(
+        self, roi_gray: np.ndarray
+    ) -> tuple[float, np.ndarray, np.ndarray, np.ndarray]:
         img = roi_gray.astype(np.float32)
         img_min = float(np.min(img))
         img_max = float(np.max(img))
@@ -284,7 +290,7 @@ class OffsetScanWorker(QtCore.QObject):
             raise RuntimeError("Not enough valid angles for warpPolar.")
 
         peaks_valid = peaks[valid].astype(np.float32)
-        return float(np.std(peaks_valid))
+        return float(np.std(peaks_valid)), polar, peaks, valid
 
     @staticmethod
     def _fit_circle(xs: np.ndarray, ys: np.ndarray) -> tuple[float, float, float]:
@@ -313,6 +319,7 @@ class DonutOptimizationWindow(QtWidgets.QDialog):
         self._camera = camera
         self._thread: Optional[QtCore.QThread] = None
         self._worker: Optional[OffsetScanWorker] = None
+        self._debug_window: Optional[DebugWindow] = None
 
         self.setWindowTitle("Donut Optimization Wizard")
         self.resize(600, 520)
@@ -432,6 +439,16 @@ class DonutOptimizationWindow(QtWidgets.QDialog):
         self.btn_start.clicked.connect(self._start)
         self.btn_stop.clicked.connect(self._stop)
 
+        self.chk_debug = QtWidgets.QCheckBox("Enable debug view")
+        self.chk_debug.setChecked(False)
+        self.btn_debug = QtWidgets.QPushButton("Open Debug Window")
+        self.btn_debug.clicked.connect(self._open_debug)
+        dbg = QtWidgets.QHBoxLayout()
+        dbg.addWidget(self.chk_debug)
+        dbg.addWidget(self.btn_debug)
+        dbg.addStretch(1)
+        layout.addLayout(dbg)
+
     def _select_roi(self) -> None:
         if not self._camera.is_running():
             self._append_error("Camera must be running to select ROI.")
@@ -464,6 +481,7 @@ class DonutOptimizationWindow(QtWidgets.QDialog):
             refine_y_step_mm=float(self.dsb_ref_y_step.value()),
             settle_ms=int(self.spin_settle.value()),
             slot=int(self.spin_slot.value()),
+            debug_enabled=self.chk_debug.isChecked(),
         )
 
         self._thread = QtCore.QThread(self)
@@ -474,6 +492,7 @@ class DonutOptimizationWindow(QtWidgets.QDialog):
         self._worker.progress.connect(self._on_progress)
         self._worker.failed.connect(self._on_failed)
         self._worker.finished.connect(self._on_finished)
+        self._worker.debug_data.connect(self._on_debug_data)
         self._thread.start()
         self.btn_start.setEnabled(False)
         self.btn_stop.setEnabled(True)
@@ -507,3 +526,18 @@ class DonutOptimizationWindow(QtWidgets.QDialog):
 
     def _append_error(self, text: str) -> None:
         self.log.appendPlainText("ERROR: " + text)
+
+    def _open_debug(self) -> None:
+        if self._debug_window is None:
+            self._debug_window = DebugWindow(self)
+        self._debug_window.show()
+        self._debug_window.raise_()
+        self._debug_window.activateWindow()
+
+    def _on_debug_data(
+        self, roi_gray: np.ndarray, polar: np.ndarray, peaks: np.ndarray, valid: np.ndarray
+    ) -> None:
+        if self._debug_window is None:
+            self._debug_window = DebugWindow(self)
+        if self.chk_debug.isChecked():
+            self._debug_window.update_views(roi_gray, polar, peaks, valid)
