@@ -175,11 +175,14 @@ class OffsetScanWorker(QtCore.QObject):
 
         if cv2 is not None:
             try:
-                ring_center, ring_r = self._find_ring_cv2(roi_gray)
+                rx, ry, ring_r, edges = self._find_ring_cv2_with_edges(roi_gray)
+                ring_center = (rx, ry)
                 score, polar, peaks, valid = self._score_warp_polar(roi_gray, ring_center)
                 if self._settings.debug_enabled:
                     hole_center = self._safe_find_hole_center(roi_gray)
-                    debug_roi = self._draw_overlay(roi_gray, ring_center, ring_r, hole_center)
+                    debug_roi = self._draw_overlay(
+                        roi_gray, ring_center, ring_r, hole_center, edges
+                    )
                     self.debug_data.emit(debug_roi, polar, peaks, valid)
                 self.log.emit(f"warpPolar score={score:.3f}")
                 return float(score)
@@ -187,22 +190,28 @@ class OffsetScanWorker(QtCore.QObject):
                 self.log.emit(f"warpPolar failed: {exc}; falling back to circle fit.")
                 if self._settings.debug_enabled:
                     try:
-                        ring_center, ring_r = self._find_ring_cv2(roi_gray)
+                        rx, ry, ring_r, edges = self._find_ring_cv2_with_edges(roi_gray)
+                        ring_center = (rx, ry)
                     except Exception:
-                        ring_center, ring_r = None, None
+                        ring_center, ring_r, edges = None, None, None
                     hole_center = self._safe_find_hole_center(roi_gray)
-                    debug_roi = self._draw_overlay(roi_gray, ring_center, ring_r, hole_center)
+                    debug_roi = self._draw_overlay(
+                        roi_gray, ring_center, ring_r, hole_center, edges
+                    )
                     self.debug_data.emit(debug_roi, polar, peaks, valid)
 
         score = self._score_center_distance(roi_gray)
         if self._settings.debug_enabled:
             if cv2 is not None:
                 try:
-                    ring_center, ring_r = self._find_ring_cv2(roi_gray)
+                    rx, ry, ring_r, edges = self._find_ring_cv2_with_edges(roi_gray)
+                    ring_center = (rx, ry)
                 except Exception:
-                    ring_center, ring_r = None, None
+                    ring_center, ring_r, edges = None, None, None
                 hole_center = self._safe_find_hole_center(roi_gray)
-                debug_roi = self._draw_overlay(roi_gray, ring_center, ring_r, hole_center)
+                debug_roi = self._draw_overlay(
+                    roi_gray, ring_center, ring_r, hole_center, edges
+                )
                 self.debug_data.emit(debug_roi, polar, peaks, valid)
             else:
                 self.debug_data.emit(roi_gray, polar, peaks, valid)
@@ -323,17 +332,66 @@ class OffsetScanWorker(QtCore.QObject):
         return float(hx), float(hy)
 
     def _find_ring_cv2(self, roi_gray: np.ndarray) -> tuple[float, float, float]:
+        rx, ry, r, _ = self._find_ring_cv2_with_edges(roi_gray)
+        return rx, ry, r
+
+    def _find_ring_cv2_with_edges(
+        self, roi_gray: np.ndarray
+    ) -> tuple[float, float, float, Optional[Tuple[np.ndarray, np.ndarray]]]:
         img = self._normalize_to_u8(roi_gray)
         blur = cv2.GaussianBlur(img, (5, 5), 0)
+
+        xs, ys = self._ring_edges_from_gradient(blur)
+        if len(xs) >= 30:
+            rx, ry, r = self._fit_circle(xs, ys)
+            return rx, ry, r, (xs, ys)
+
+        xs, ys = self._ring_edges_from_canny(blur)
+        if len(xs) >= 30:
+            rx, ry, r = self._fit_circle(xs, ys)
+            return rx, ry, r, (xs, ys)
+
+        rx, ry, r = self._ring_from_bright_mask(blur)
+        return rx, ry, r, None
+
+    @staticmethod
+    def _ring_edges_from_gradient(blur: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        gx = cv2.Sobel(blur, cv2.CV_32F, 1, 0, ksize=3)
+        gy = cv2.Sobel(blur, cv2.CV_32F, 0, 1, ksize=3)
+        mag = cv2.magnitude(gx, gy)
+        if not np.isfinite(mag).all():
+            mag = np.nan_to_num(mag)
+
+        thresholds = [97.0, 95.0, 92.0, 90.0, 85.0, 80.0]
+        for pct in thresholds:
+            thr = np.percentile(mag, pct)
+            edges = mag >= thr
+            ys, xs = np.where(edges)
+            if len(xs) >= 30:
+                return xs, ys
+        return np.array([]), np.array([])
+
+    @staticmethod
+    def _ring_edges_from_canny(blur: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         v = np.median(blur)
         lower = int(max(0, 0.66 * v))
         upper = int(min(255, 1.33 * v))
         edges = cv2.Canny(blur, lower, upper)
         ys, xs = np.where(edges > 0)
-        if len(xs) < 30:
-            raise RuntimeError("Not enough edge points for ring fit.")
-        rx, ry, r = self._fit_circle(xs, ys)
-        return rx, ry, r
+        return xs, ys
+
+    @staticmethod
+    def _ring_from_bright_mask(blur: np.ndarray) -> tuple[float, float, float]:
+        thr = np.percentile(blur, 85.0)
+        mask = blur >= thr
+        ys, xs = np.where(mask)
+        if len(xs) < 50:
+            raise RuntimeError("Not enough bright ring pixels.")
+        cx = float(xs.mean())
+        cy = float(ys.mean())
+        d = np.sqrt((xs - cx) ** 2 + (ys - cy) ** 2)
+        r = float(np.median(d))
+        return cx, cy, r
 
     def _safe_find_hole_center(self, roi_gray: np.ndarray) -> Optional[Tuple[float, float]]:
         if cv2 is None:
@@ -349,11 +407,24 @@ class OffsetScanWorker(QtCore.QObject):
         ring_center: Optional[Tuple[float, float]],
         ring_r: Optional[float],
         hole_center: Optional[Tuple[float, float]],
+        edge_points: Optional[Tuple[np.ndarray, np.ndarray]] = None,
     ) -> np.ndarray:
         base = self._normalize_to_u8(roi_gray)
         if cv2 is None:
             return base
         color = cv2.cvtColor(base, cv2.COLOR_GRAY2BGR)
+        if edge_points is not None:
+            xs, ys = edge_points
+            if len(xs) > 0:
+                if len(xs) > 2000:
+                    idx = np.linspace(0, len(xs) - 1, 2000).astype(int)
+                    xs = xs[idx]
+                    ys = ys[idx]
+                xs = xs.astype(int)
+                ys = ys.astype(int)
+                h, w = color.shape[:2]
+                mask = (xs >= 0) & (xs < w) & (ys >= 0) & (ys < h)
+                color[ys[mask], xs[mask]] = (0, 255, 255)
         if ring_center is not None and ring_r is not None:
             cx, cy = int(round(ring_center[0])), int(round(ring_center[1]))
             cv2.circle(color, (cx, cy), int(round(ring_r)), (0, 255, 0), 1)

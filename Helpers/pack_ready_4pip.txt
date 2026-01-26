@@ -21,4 +21,5 @@ scipy
 six
 tzdata
 PySide6
+opencv-python
 pyzmq
