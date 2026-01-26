@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from typing import Optional, Tuple
 
 import numpy as np
-from PySide6 import QtCore, QtWidgets
+from PySide6 import QtCore, QtGui, QtWidgets
 
 try:
     import cv2
@@ -303,6 +303,122 @@ class OffsetScanWorker(QtCore.QObject):
         cx, cy, c = sol
         r = math.sqrt(max(c + cx * cx + cy * cy, 0.0))
         return float(cx), float(cy), float(r)
+
+
+class DebugWindow(QtWidgets.QDialog):
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Donut Optimization Debug")
+        self.resize(900, 600)
+
+        self._roi_pixmap: Optional[QtGui.QPixmap] = None
+        self._polar_pixmap: Optional[QtGui.QPixmap] = None
+        self._peaks_pixmap: Optional[QtGui.QPixmap] = None
+
+        layout = QtWidgets.QGridLayout(self)
+
+        self.lbl_roi_title = QtWidgets.QLabel("ROI (grayscale)")
+        self.lbl_polar_title = QtWidgets.QLabel("Polar unwrap")
+        self.lbl_peaks_title = QtWidgets.QLabel("Peaks (radius vs angle)")
+
+        self.lbl_roi = QtWidgets.QLabel()
+        self.lbl_polar = QtWidgets.QLabel()
+        self.lbl_peaks = QtWidgets.QLabel()
+        for lbl in (self.lbl_roi, self.lbl_polar, self.lbl_peaks):
+            lbl.setFrameStyle(QtWidgets.QFrame.Box | QtWidgets.QFrame.Plain)
+            lbl.setAlignment(QtCore.Qt.AlignCenter)
+            lbl.setMinimumSize(240, 180)
+
+        self.lbl_stats = QtWidgets.QLabel("")
+
+        layout.addWidget(self.lbl_roi_title, 0, 0)
+        layout.addWidget(self.lbl_polar_title, 0, 1)
+        layout.addWidget(self.lbl_roi, 1, 0)
+        layout.addWidget(self.lbl_polar, 1, 1)
+        layout.addWidget(self.lbl_peaks_title, 2, 0, 1, 2)
+        layout.addWidget(self.lbl_peaks, 3, 0, 1, 2)
+        layout.addWidget(self.lbl_stats, 4, 0, 1, 2)
+
+    def update_views(
+        self, roi_gray: np.ndarray, polar: np.ndarray, peaks: np.ndarray, valid: np.ndarray
+    ) -> None:
+        self._roi_pixmap = self._gray_to_pixmap(roi_gray)
+        self._polar_pixmap = self._gray_to_pixmap(polar)
+        self._peaks_pixmap = self._plot_peaks(peaks, valid)
+        self._apply_scaled()
+
+        if peaks is not None and len(peaks) > 0:
+            valid_count = int(np.count_nonzero(valid)) if valid is not None else len(peaks)
+            std = float(np.std(peaks[valid])) if valid is not None else float(np.std(peaks))
+            self.lbl_stats.setText(
+                f"Angles: {len(peaks)} | Valid: {valid_count} | Peaks std: {std:.3f}"
+            )
+
+    def resizeEvent(self, event: QtGui.QResizeEvent) -> None:
+        super().resizeEvent(event)
+        self._apply_scaled()
+
+    def _apply_scaled(self) -> None:
+        if self._roi_pixmap is not None:
+            self.lbl_roi.setPixmap(self._scaled(self._roi_pixmap, self.lbl_roi))
+        if self._polar_pixmap is not None:
+            self.lbl_polar.setPixmap(self._scaled(self._polar_pixmap, self.lbl_polar))
+        if self._peaks_pixmap is not None:
+            self.lbl_peaks.setPixmap(self._scaled(self._peaks_pixmap, self.lbl_peaks))
+
+    @staticmethod
+    def _scaled(pix: QtGui.QPixmap, label: QtWidgets.QLabel) -> QtGui.QPixmap:
+        return pix.scaled(
+            label.size(), QtCore.Qt.KeepAspectRatio, QtCore.Qt.SmoothTransformation
+        )
+
+    @staticmethod
+    def _gray_to_pixmap(arr: np.ndarray) -> QtGui.QPixmap:
+        if arr.ndim != 2:
+            arr = arr[:, :, 0]
+        if arr.dtype != np.uint8:
+            arr_min = float(np.min(arr))
+            arr_max = float(np.max(arr))
+            if arr_max <= arr_min:
+                arr = np.zeros_like(arr, dtype=np.uint8)
+            else:
+                arr = ((arr - arr_min) / (arr_max - arr_min) * 255.0).astype(np.uint8)
+        arr = np.ascontiguousarray(arr)
+        h, w = arr.shape
+        qimg = QtGui.QImage(arr.data, w, h, w, QtGui.QImage.Format_Grayscale8)
+        return QtGui.QPixmap.fromImage(qimg.copy())
+
+    @staticmethod
+    def _plot_peaks(peaks: np.ndarray, valid: np.ndarray) -> QtGui.QPixmap:
+        if peaks is None or len(peaks) == 0:
+            pix = QtGui.QPixmap(400, 200)
+            pix.fill(QtGui.QColor(40, 40, 40))
+            return pix
+
+        peaks = peaks.astype(np.float32)
+        width = max(200, int(len(peaks)))
+        height = 200
+        pix = QtGui.QPixmap(width, height)
+        pix.fill(QtGui.QColor(30, 30, 30))
+
+        max_p = float(np.max(peaks)) if float(np.max(peaks)) > 0 else 1.0
+        painter = QtGui.QPainter(pix)
+        painter.setRenderHint(QtGui.QPainter.Antialiasing, False)
+
+        if valid is None or len(valid) != len(peaks):
+            valid = np.ones(len(peaks), dtype=bool)
+
+        pen_valid = QtGui.QPen(QtGui.QColor(0, 200, 0), 1)
+        pen_invalid = QtGui.QPen(QtGui.QColor(180, 60, 60), 1)
+
+        for i in range(1, len(peaks)):
+            y1 = height - 1 - int((peaks[i - 1] / max_p) * (height - 1))
+            y2 = height - 1 - int((peaks[i] / max_p) * (height - 1))
+            painter.setPen(pen_valid if valid[i] and valid[i - 1] else pen_invalid)
+            painter.drawLine(i - 1, y1, i, y2)
+
+        painter.end()
+        return pix
 
 
 class DonutOptimizationWindow(QtWidgets.QDialog):
