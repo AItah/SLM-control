@@ -254,8 +254,8 @@ class OffsetScanWorker(QtCore.QObject):
         )
 
         if self._settings.debug_enabled:
-            debug_roi = self._draw_manual_overlay(roi_gray, (cx, cy), radius, meta)
-            self.debug_data.emit(debug_roi, polar, peaks, valid, meta)
+            debug_crop = self._crop_circle_mask(roi_gray, (cx, cy), radius)
+            self.debug_data.emit(debug_crop, None, None, None, meta)
 
         self.log.emit(
             f"manual concentricity score={score:.3f} px (valid {int(np.count_nonzero(valid))}/{len(valid)})"
@@ -704,6 +704,34 @@ class OffsetScanWorker(QtCore.QObject):
         except Exception:
             return None
 
+    @staticmethod
+    def _crop_circle_mask(
+        img: np.ndarray, center: Tuple[float, float], radius: float
+    ) -> np.ndarray:
+        if img.size == 0:
+            return img
+        h, w = img.shape[:2]
+        cx, cy = center
+        r = max(1.0, float(radius))
+        x0 = int(math.floor(cx - r))
+        x1 = int(math.ceil(cx + r))
+        y0 = int(math.floor(cy - r))
+        y1 = int(math.ceil(cy + r))
+        x0c = max(0, x0)
+        y0c = max(0, y0)
+        x1c = min(w, x1)
+        y1c = min(h, y1)
+        if x1c <= x0c or y1c <= y0c:
+            return np.zeros((0, 0), dtype=img.dtype)
+        crop = img[y0c:y1c, x0c:x1c].copy()
+        yy, xx = np.indices(crop.shape[:2])
+        dx = (x0c + xx) - cx
+        dy = (y0c + yy) - cy
+        mask = (dx * dx + dy * dy) <= (r * r)
+        masked = np.zeros_like(crop)
+        masked[mask] = crop[mask]
+        return masked
+
     def _draw_manual_overlay(
         self,
         roi_gray: np.ndarray,
@@ -778,38 +806,27 @@ class DebugWindow(QtWidgets.QDialog):
         self.setWindowTitle("Donut Optimization Debug")
         self.resize(900, 600)
 
-        self._roi_pixmap: Optional[QtGui.QPixmap] = None
-        self._polar_pixmap: Optional[QtGui.QPixmap] = None
-        self._peaks_pixmap: Optional[QtGui.QPixmap] = None
+        self._crop_pixmap: Optional[QtGui.QPixmap] = None
 
         layout = QtWidgets.QGridLayout(self)
 
-        self.lbl_roi_title = QtWidgets.QLabel("ROI (grayscale)")
-        self.lbl_polar_title = QtWidgets.QLabel("Polar unwrap")
-        self.lbl_peaks_title = QtWidgets.QLabel("Peaks (radius vs angle)")
-        self.lbl_data_title = QtWidgets.QLabel("Angle data")
+        self.lbl_crop_title = QtWidgets.QLabel("Circle crop (masked)")
+        self.lbl_data_title = QtWidgets.QLabel("Debug data")
 
-        self.lbl_roi = QtWidgets.QLabel()
-        self.lbl_polar = QtWidgets.QLabel()
-        self.lbl_peaks = QtWidgets.QLabel()
+        self.lbl_crop = QtWidgets.QLabel()
         self.txt_data = QtWidgets.QPlainTextEdit(readOnly=True)
         self.txt_data.setMaximumBlockCount(10000)
-        for lbl in (self.lbl_roi, self.lbl_polar, self.lbl_peaks):
-            lbl.setFrameStyle(QtWidgets.QFrame.Box | QtWidgets.QFrame.Plain)
-            lbl.setAlignment(QtCore.Qt.AlignCenter)
-            lbl.setMinimumSize(240, 180)
+        self.lbl_crop.setFrameStyle(QtWidgets.QFrame.Box | QtWidgets.QFrame.Plain)
+        self.lbl_crop.setAlignment(QtCore.Qt.AlignCenter)
+        self.lbl_crop.setMinimumSize(240, 180)
 
         self.lbl_stats = QtWidgets.QLabel("")
 
-        layout.addWidget(self.lbl_roi_title, 0, 0)
-        layout.addWidget(self.lbl_polar_title, 0, 1)
-        layout.addWidget(self.lbl_roi, 1, 0)
-        layout.addWidget(self.lbl_polar, 1, 1)
-        layout.addWidget(self.lbl_peaks_title, 2, 0, 1, 2)
-        layout.addWidget(self.lbl_peaks, 3, 0, 1, 2)
-        layout.addWidget(self.lbl_stats, 4, 0, 1, 2)
-        layout.addWidget(self.lbl_data_title, 5, 0, 1, 2)
-        layout.addWidget(self.txt_data, 6, 0, 1, 2)
+        layout.addWidget(self.lbl_crop_title, 0, 0)
+        layout.addWidget(self.lbl_crop, 1, 0)
+        layout.addWidget(self.lbl_stats, 2, 0)
+        layout.addWidget(self.lbl_data_title, 3, 0)
+        layout.addWidget(self.txt_data, 4, 0)
 
     def update_views(
         self,
@@ -819,24 +836,23 @@ class DebugWindow(QtWidgets.QDialog):
         valid: np.ndarray,
         meta: dict,
     ) -> None:
-        self._roi_pixmap = self._gray_to_pixmap(roi_gray) if roi_gray is not None else None
-        self._polar_pixmap = self._gray_to_pixmap(polar) if polar is not None else None
-        self._peaks_pixmap = self._plot_peaks(peaks, valid)
+        if roi_gray is not None and roi_gray.size > 0:
+            self._crop_pixmap = self._gray_to_pixmap(roi_gray)
+        else:
+            self._crop_pixmap = None
         self._apply_scaled()
 
-        if peaks is not None and len(peaks) > 0:
-            valid_count = int(np.count_nonzero(valid)) if valid is not None else len(peaks)
-            std = float(np.std(peaks[valid])) if valid is not None else float(np.std(peaks))
-            extra = ""
-            if meta:
-                fit = meta.get("fit_offset")
-                if fit:
-                    extra = f" | Fit dx,dy: ({fit[0]:.2f}, {fit[1]:.2f})"
-            self.lbl_stats.setText(
-                f"Angles: {len(peaks)} | Valid: {valid_count} | Peaks std: {std:.3f}{extra}"
-            )
+        if meta:
+            center = meta.get("center")
+            radius = meta.get("radius")
+            if center is not None and radius is not None:
+                self.lbl_stats.setText(
+                    f"center=({center[0]:.2f}, {center[1]:.2f}) radius={radius:.2f}"
+                )
+            else:
+                self.lbl_stats.setText("No circle metadata.")
         else:
-            self.lbl_stats.setText("No peaks data.")
+            self.lbl_stats.setText("No metadata.")
 
         self._update_data_table(peaks, valid, meta)
 
@@ -845,33 +861,17 @@ class DebugWindow(QtWidgets.QDialog):
         self._apply_scaled()
 
     def _apply_scaled(self) -> None:
-        if self._roi_pixmap is not None:
-            self.lbl_roi.setPixmap(self._scaled(self._roi_pixmap, self.lbl_roi))
+        if self._crop_pixmap is not None:
+            self.lbl_crop.setPixmap(self._scaled(self._crop_pixmap, self.lbl_crop))
         else:
-            self.lbl_roi.clear()
-        if self._polar_pixmap is not None:
-            self.lbl_polar.setPixmap(self._scaled(self._polar_pixmap, self.lbl_polar))
-        else:
-            self.lbl_polar.clear()
-        if self._peaks_pixmap is not None:
-            self.lbl_peaks.setPixmap(self._scaled(self._peaks_pixmap, self.lbl_peaks))
-        else:
-            self.lbl_peaks.clear()
+            self.lbl_crop.clear()
 
     def _update_data_table(
         self, peaks: np.ndarray, valid: np.ndarray, meta: Optional[dict]
     ) -> None:
-        if peaks is None or meta is None or "angles_deg" not in meta:
+        if meta is None:
             self.txt_data.setPlainText("No data.")
             return
-        angles = meta.get("angles_deg")
-        max_per = meta.get("max_per_angle")
-        if angles is None:
-            self.txt_data.setPlainText("No data.")
-            return
-        if valid is None or len(valid) != len(peaks):
-            valid = np.ones(len(peaks), dtype=bool)
-
         lines = []
         if "center" in meta and "radius" in meta:
             cx, cy = meta["center"]
@@ -885,17 +885,24 @@ class DebugWindow(QtWidgets.QDialog):
         if "fit_center" in meta:
             fx, fy = meta["fit_center"]
             lines.append(f"fit_center=({fx:.2f}, {fy:.2f})")
-        for i, angle in enumerate(angles):
-            peak_r = peaks[i] if i < len(peaks) else float("nan")
-            max_val = (
-                max_per[i] if max_per is not None and i < len(max_per) else float("nan")
-            )
-            val = 1 if bool(valid[i]) else 0
-            lines.append(
-                f"{i:03d} angle={angle:6.1f} deg peak_r={peak_r:7.2f} "
-                f"max={max_val:7.1f} valid={val}"
-            )
-        self.txt_data.setPlainText("\n".join(lines))
+
+        angles = meta.get("angles_deg")
+        max_per = meta.get("max_per_angle")
+        if peaks is not None and angles is not None:
+            if valid is None or len(valid) != len(peaks):
+                valid = np.ones(len(peaks), dtype=bool)
+            for i, angle in enumerate(angles):
+                peak_r = peaks[i] if i < len(peaks) else float("nan")
+                max_val = (
+                    max_per[i] if max_per is not None and i < len(max_per) else float("nan")
+                )
+                val = 1 if bool(valid[i]) else 0
+                lines.append(
+                    f"{i:03d} angle={angle:6.1f} deg peak_r={peak_r:7.2f} "
+                    f"max={max_val:7.1f} valid={val}"
+                )
+
+        self.txt_data.setPlainText("\n".join(lines) if lines else "No data.")
 
     @staticmethod
     def _scaled(pix: QtGui.QPixmap, label: QtWidgets.QLabel) -> QtGui.QPixmap:
@@ -990,27 +997,13 @@ class DonutOptimizationWindow(QtWidgets.QDialog):
         self.resize(600, 520)
 
         self._build_ui()
-        self._camera.roi_changed.connect(self._on_roi_changed)
         self._camera.point_selected.connect(self._on_point_selected)
         self._camera.circle_selected.connect(self._on_circle_selected)
 
     def _build_ui(self) -> None:
         layout = QtWidgets.QVBoxLayout(self)
 
-        roi_group = QtWidgets.QGroupBox("1) Select ROI")
-        roi_layout = QtWidgets.QHBoxLayout(roi_group)
-        self.lbl_roi = QtWidgets.QLabel("ROI: not set")
-        self.btn_select_roi = QtWidgets.QPushButton("Select ROI")
-        self.btn_select_roi.clicked.connect(self._select_roi)
-        self.btn_clear_roi = QtWidgets.QPushButton("Clear ROI")
-        self.btn_clear_roi.clicked.connect(self._clear_roi)
-        roi_layout.addWidget(self.lbl_roi)
-        roi_layout.addStretch(1)
-        roi_layout.addWidget(self.btn_select_roi)
-        roi_layout.addWidget(self.btn_clear_roi)
-        layout.addWidget(roi_group)
-
-        manual_group = QtWidgets.QGroupBox("2) Manual Target")
+        manual_group = QtWidgets.QGroupBox("1) Manual Target")
         manual_layout = QtWidgets.QGridLayout(manual_group)
         self.lbl_manual_center = QtWidgets.QLabel("Hint (dark spot): not set")
         self.lbl_manual_radius = QtWidgets.QLabel("Circle: not set")
@@ -1018,6 +1011,8 @@ class DonutOptimizationWindow(QtWidgets.QDialog):
         self.btn_pick_center.clicked.connect(self._pick_dark_spot)
         self.btn_pick_circle = QtWidgets.QPushButton("Draw donut circle")
         self.btn_pick_circle.clicked.connect(self._pick_donut_circle)
+        self.btn_analyze = QtWidgets.QPushButton("Donut analysis")
+        self.btn_analyze.clicked.connect(self._run_donut_analysis)
         self.btn_clear_manual = QtWidgets.QPushButton("Clear")
         self.btn_clear_manual.clicked.connect(self._clear_manual_target)
 
@@ -1026,9 +1021,10 @@ class DonutOptimizationWindow(QtWidgets.QDialog):
         manual_layout.addWidget(self.btn_pick_center, 0, 2)
         manual_layout.addWidget(self.btn_pick_circle, 1, 2)
         manual_layout.addWidget(self.btn_clear_manual, 0, 3, 2, 1)
+        manual_layout.addWidget(self.btn_analyze, 2, 0, 1, 4)
         layout.addWidget(manual_group)
 
-        scan_group = QtWidgets.QGroupBox("3) Scan Settings (mm)")
+        scan_group = QtWidgets.QGroupBox("2) Scan Settings (mm)")
         scan_layout = QtWidgets.QGridLayout(scan_group)
         r = 0
         self.dsb_x_range = QtWidgets.QDoubleSpinBox()
@@ -1144,21 +1140,6 @@ class DonutOptimizationWindow(QtWidgets.QDialog):
         dbg.addStretch(1)
         layout.addLayout(dbg)
 
-    def _select_roi(self) -> None:
-        if not self._camera.is_running():
-            self._append_error("Camera must be running to select ROI.")
-            return
-        self._camera.begin_roi_selection()
-
-    def _on_roi_changed(self, roi: Tuple[int, int, int, int]) -> None:
-        if roi is None:
-            self.lbl_roi.setText("ROI: not set")
-        else:
-            self.lbl_roi.setText(f"ROI: {roi}")
-
-    def _clear_roi(self) -> None:
-        self._camera.clear_roi()
-
     def _pick_dark_spot(self) -> None:
         if not self._camera.is_running():
             self._append_error("Camera must be running.")
@@ -1168,9 +1149,6 @@ class DonutOptimizationWindow(QtWidgets.QDialog):
     def _pick_donut_circle(self) -> None:
         if not self._camera.is_running():
             self._append_error("Camera must be running.")
-            return
-        if self._manual_center is None:
-            self._append_error("Pick the dark spot center first.")
             return
         # Circle selection should be independent from the picked dark-spot center.
         self._camera.begin_circle_selection()
@@ -1216,6 +1194,35 @@ class DonutOptimizationWindow(QtWidgets.QDialog):
                     f"r={self._manual_radius:.1f} px"
                 )
 
+    def _run_donut_analysis(self) -> None:
+        if not self._camera.is_running():
+            self._append_error("Camera must be running.")
+            return
+        if self._circle_center is None or self._manual_radius is None:
+            self._append_error("Please draw the donut circle.")
+            return
+        frame = self._camera.get_last_frame()
+        if frame is None:
+            self._append_error("No camera frame available.")
+            return
+        gray = OffsetScanWorker._to_gray(frame)
+        cx, cy = self._circle_center
+        radius = float(self._manual_radius)
+        crop = OffsetScanWorker._crop_circle_mask(gray, (cx, cy), radius)
+        meta = {
+            "center": (float(cx), float(cy)),
+            "radius": float(radius),
+            "r_min": 0.0,
+            "r_max": float(radius),
+        }
+        if self._debug_window is None:
+            self._debug_window = DebugWindow(self)
+        self._debug_window.update_views(crop, None, None, None, meta)
+        self._debug_window.show()
+        self._debug_window.raise_()
+        self._debug_window.activateWindow()
+        self._append_log("Donut analysis: plotted circle crop.")
+
     def _start(self) -> None:
         if not self._camera.is_running():
             self._append_error("Camera must be running.")
@@ -1250,7 +1257,6 @@ class DonutOptimizationWindow(QtWidgets.QDialog):
                 self._append_error("Auto ROI failed (invalid crop).")
                 return
             roi = (int(x0), int(y0), int(x1 - x0), int(y1 - y0))
-            self.lbl_roi.setText(f"ROI: {roi} (auto)")
         cx, cy = ref_center
         x, y, w, h = roi
         if not (x <= cx < x + w and y <= cy < y + h):
