@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import csv
 import math
 import time
+from pathlib import Path
 from dataclasses import dataclass
 from typing import Optional, Tuple
 
@@ -605,6 +607,183 @@ class OffsetScanWorker(QtCore.QObject):
             return None, None, {"stage": "cv2_missing"}
         return refine_dark_spot(img, click[0], click[1], roi_size=roi_size)
 
+
+class CostScanWorker(QtCore.QObject):
+    log = QtCore.Signal(str)
+    progress = QtCore.Signal(int, int)
+    finished = QtCore.Signal(float, float, str)
+    failed = QtCore.Signal(str)
+    debug_data = QtCore.Signal(object, object, object, object, object, object)
+
+    def __init__(
+        self,
+        vortex: VortexWindow,
+        slm: SlmControlWindow,
+        camera: CameraWindow,
+        settings: ScanSettings,
+    ) -> None:
+        super().__init__()
+        self._vortex = vortex
+        self._slm = slm
+        self._camera = camera
+        self._settings = settings
+        self._running = True
+
+    @QtCore.Slot()
+    def run(self) -> None:
+        try:
+            best_x, best_y, csv_path = self._run_scan()
+        except Exception as exc:
+            self.failed.emit(str(exc))
+            return
+        self.finished.emit(best_x, best_y, csv_path)
+
+    def stop(self) -> None:
+        self._running = False
+
+    def _run_scan(self) -> Tuple[float, float, str]:
+        center_x, center_y = self._vortex.get_offsets_mm()
+        xs = OffsetScanWorker._build_offsets(
+            center_x, self._settings.x_range_mm, self._settings.x_step_mm
+        )
+        ys = OffsetScanWorker._build_offsets(
+            center_y, self._settings.y_range_mm, self._settings.y_step_mm
+        )
+        total = max(1, len(xs) * len(ys))
+        count = 0
+
+        results: list[tuple[float, float, float]] = []
+        best_cost = float("inf")
+        best_x, best_y = center_x, center_y
+
+        for row, y_mm in enumerate(ys):
+            if not self._running:
+                raise RuntimeError("Scan canceled.")
+            row_xs = xs if (row % 2 == 0) else list(reversed(xs))
+            for x_mm in row_xs:
+                if not self._running:
+                    raise RuntimeError("Scan canceled.")
+                cost = self._evaluate_cost(x_mm, y_mm)
+                results.append((x_mm, y_mm, cost))
+                if cost < best_cost:
+                    best_cost = cost
+                    best_x, best_y = x_mm, y_mm
+                count += 1
+                self.progress.emit(min(count, total), total)
+                self.log.emit(
+                    f"Scan x={x_mm:.3f} mm y={y_mm:.3f} mm cost={cost:.4f}"
+                )
+
+        csv_path = self._write_csv(results)
+        self.log.emit(f"Scan complete. Best cost={best_cost:.4f} at x={best_x:.3f} y={best_y:.3f}")
+        return best_x, best_y, csv_path
+
+    def _evaluate_cost(self, offset_x_mm: float, offset_y_mm: float) -> float:
+        prev_time = self._camera.get_last_frame_time()
+        mask_u8 = self._vortex.build_mask(offset_x_mm, offset_y_mm)
+        ok = self._slm.send_mask_to_slot(mask_u8, self._settings.slot)
+        if not ok:
+            raise RuntimeError("Failed to send mask to SLM.")
+
+        time.sleep(max(2.0, self._settings.settle_ms / 1000.0))
+
+        timeout = time.monotonic() + 1.0
+        while time.monotonic() < timeout:
+            if self._camera.get_last_frame_time() > prev_time:
+                break
+            time.sleep(0.05)
+
+        frame = self._camera.get_last_frame()
+        if frame is None:
+            raise RuntimeError("No camera frame available.")
+
+        gray = OffsetScanWorker._to_gray(frame)
+        if self._settings.filter_enabled:
+            thr = float(self._settings.filter_threshold)
+            gray = gray.copy()
+            gray[gray < thr] = 0.0
+
+        cx, cy = self._settings.circle_center
+        radius = float(self._settings.circle_radius)
+        crop = OffsetScanWorker._crop_circle_mask(gray, (cx, cy), radius)
+        x0c, y0c, _, _ = OffsetScanWorker._circle_crop_bounds(
+            gray.shape[:2], (cx, cy), radius
+        )
+        dark_x, dark_y = self._settings.dark_hint
+        center_in_crop = (float(dark_x - x0c), float(dark_y - y0c))
+
+        cost = self._donut_cost(
+            crop,
+            center_in_crop,
+            max_r=radius,
+            num_angles=max(8, int(self._settings.angles_count)),
+            num_pts=100,
+        )
+
+        if self._settings.debug_enabled:
+            base_angle = math.atan2(dark_y - cy, dark_x - cx)
+            overlay = DonutOptimizationWindow._draw_angle_lines(
+                crop,
+                (float(cx - x0c), float(cy - y0c)),
+                radius,
+                base_angle,
+                max(1, int(self._settings.angles_count)),
+            )
+            pixel_size_mm = float(self._settings.pixel_size_mm)
+            profile_x_mm, profile_y = DonutOptimizationWindow._sample_line_profile(
+                gray, (float(cx), float(cy)), radius, base_angle, pixel_size_mm
+            )
+            meta = {
+                "center": (float(cx), float(cy)),
+                "radius": float(radius),
+                "profile_x_mm": (float(profile_x_mm[0]), float(profile_x_mm[-1])),
+                "cost": float(cost),
+            }
+            if self._settings.filter_enabled:
+                meta["filter_threshold"] = float(self._settings.filter_threshold)
+            self.debug_data.emit(crop, overlay, None, None, meta, (profile_x_mm, profile_y))
+
+        return float(cost)
+
+    @staticmethod
+    def _donut_cost(
+        img_gray: np.ndarray,
+        center: Tuple[float, float],
+        max_r: float,
+        num_angles: int,
+        num_pts: int,
+    ) -> float:
+        if img_gray is None or img_gray.size == 0:
+            return float("inf")
+        cx, cy = center
+        angles = np.linspace(0.0, 2.0 * math.pi, num_angles, endpoint=False)
+        profiles = np.zeros((num_pts, num_angles), dtype=np.float32)
+        radii = np.linspace(0.0, float(max_r), num_pts, dtype=np.float32)
+        for i, theta in enumerate(angles):
+            xs = cx + np.cos(theta) * radii
+            ys = cy + np.sin(theta) * radii
+            profiles[:, i] = OffsetScanWorker._bilinear_sample(
+                img_gray.astype(np.float32), xs, ys
+            ).ravel()
+        max_val = float(np.max(profiles))
+        if max_val > 0:
+            profiles /= max_val
+        radial_variance = np.std(profiles, axis=1)
+        asymmetry_score = float(np.sum(radial_variance))
+        hole_idx = max(1, int(num_pts * 0.1))
+        center_leakage = float(np.mean(profiles[:hole_idx, :]))
+        return asymmetry_score + (center_leakage * 10.0)
+
+    @staticmethod
+    def _write_csv(results: list[tuple[float, float, float]]) -> str:
+        ts = time.strftime("%Y%m%d_%H%M%S")
+        path = Path.cwd() / f"donut_scan_{ts}.csv"
+        with path.open("w", newline="", encoding="utf-8") as f:
+            writer = csv.writer(f)
+            writer.writerow(["x_mm", "y_mm", "cost"])
+            writer.writerows(results)
+        return str(path)
+
     def _score_warp_polar(
         self, roi_gray: np.ndarray, center: Tuple[float, float]
     ) -> tuple[float, np.ndarray, np.ndarray, np.ndarray]:
@@ -1069,6 +1248,8 @@ class DebugWindow(QtWidgets.QDialog):
             lines.append(f"dark_dbg={meta['dark_dbg']}")
         if meta.get("filter_threshold") is not None:
             lines.append(f"filter_threshold={meta['filter_threshold']}")
+        if meta.get("cost") is not None:
+            lines.append(f"cost={meta['cost']:.4f}")
         if meta.get("score_px") is not None:
             lines.append(f"score_px={meta['score_px']:.3f}")
 
@@ -1370,6 +1551,9 @@ class DonutOptimizationWindow(QtWidgets.QDialog):
         self.spin_angles.setValue(10)
         scan_layout.addWidget(QtWidgets.QLabel("Angles"), r, 0)
         scan_layout.addWidget(self.spin_angles, r, 1)
+        self.chk_cost_scan = QtWidgets.QCheckBox("Use cost scan (snake)")
+        self.chk_cost_scan.setChecked(True)
+        scan_layout.addWidget(self.chk_cost_scan, r, 2, 1, 2)
 
         layout.addWidget(scan_group)
 
@@ -1654,15 +1838,25 @@ class DonutOptimizationWindow(QtWidgets.QDialog):
         )
 
         self._thread = QtCore.QThread(self)
-        self._worker = OffsetScanWorker(self._vortex, self._slm, self._camera, settings)
-        self._worker.moveToThread(self._thread)
-        self._thread.started.connect(self._worker.run)
-        self._worker.log.connect(self._append_log)
-        self._worker.progress.connect(self._on_progress)
-        self._worker.failed.connect(self._on_failed)
-        self._worker.finished.connect(self._on_finished)
-        self._worker.debug_data.connect(self._on_debug_data)
-        self._worker.dark_center.connect(self._on_dark_center_update)
+        if self.chk_cost_scan.isChecked():
+            self._worker = CostScanWorker(self._vortex, self._slm, self._camera, settings)
+            self._worker.moveToThread(self._thread)
+            self._thread.started.connect(self._worker.run)
+            self._worker.log.connect(self._append_log)
+            self._worker.progress.connect(self._on_progress)
+            self._worker.failed.connect(self._on_failed)
+            self._worker.finished.connect(self._on_scan_finished)
+            self._worker.debug_data.connect(self._on_debug_data)
+        else:
+            self._worker = OffsetScanWorker(self._vortex, self._slm, self._camera, settings)
+            self._worker.moveToThread(self._thread)
+            self._thread.started.connect(self._worker.run)
+            self._worker.log.connect(self._append_log)
+            self._worker.progress.connect(self._on_progress)
+            self._worker.failed.connect(self._on_failed)
+            self._worker.finished.connect(self._on_finished)
+            self._worker.debug_data.connect(self._on_debug_data)
+            self._worker.dark_center.connect(self._on_dark_center_update)
         self._thread.start()
         self.btn_start.setEnabled(False)
         self.btn_stop.setEnabled(True)
@@ -1684,6 +1878,14 @@ class DonutOptimizationWindow(QtWidgets.QDialog):
 
     def _on_finished(self, best_x: float, best_y: float) -> None:
         self._append_log(f"Optimization complete. Best X={best_x:.3f} mm, Y={best_y:.3f} mm")
+        self._vortex.set_offsets_mm(best_x, best_y)
+        self._stop()
+
+    def _on_scan_finished(self, best_x: float, best_y: float, csv_path: str) -> None:
+        self._append_log(
+            f"Scan complete. Best X={best_x:.3f} mm, Y={best_y:.3f} mm"
+        )
+        self._append_log(f"Saved scan CSV: {csv_path}")
         self._vortex.set_offsets_mm(best_x, best_y)
         self._stop()
 
