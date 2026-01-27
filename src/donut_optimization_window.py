@@ -335,28 +335,64 @@ class OffsetScanWorker(QtCore.QObject):
         if max_r < 5:
             raise RuntimeError("ROI too small.")
 
-        band = max(3.0, float(radius) * 0.35)
-        r_min = max(1.0, float(radius) - band)
-        r_max = min(float(max_r) - 1.0, float(radius) + band)
-        if r_max <= r_min + 1.0:
-            raise RuntimeError("Invalid radius band.")
-
+        # Robustness: if manual center/radius are a bit off, the ring peak can land on the
+        # sampling band's edge for many angles. Try progressively wider bands / looser
+        # validity rules before giving up.
         angles = np.linspace(0.0, 2.0 * math.pi, angles_count, endpoint=False)
-        polar = self._sample_polar(img, center, r_min, r_max, angles)
-        if polar.size == 0:
-            raise RuntimeError("Polar sampling failed.")
+        attempts = [
+            # (band_scale, threshold_percentile, require_non_edge_peak)
+            (0.35, 25.0, True),
+            (0.55, 20.0, True),
+            (0.80, 15.0, False),
+            (1.10, 10.0, False),
+        ]
 
-        peaks_idx = np.argmax(polar, axis=1)
-        max_per_angle = polar.max(axis=1)
-        step = (r_max - r_min) / max(1, (polar.shape[1] - 1))
-        peaks_r = r_min + peaks_idx * step
+        last_diag: dict | None = None
+        for band_scale, thr_pct, require_non_edge in attempts:
+            band = max(3.0, float(radius) * float(band_scale))
+            r_min = max(1.0, float(radius) - band)
+            r_max = min(float(max_r) - 1.0, float(radius) + band)
+            if r_max <= r_min + 1.0:
+                last_diag = {"reason": "invalid_band", "r_min": r_min, "r_max": r_max}
+                continue
 
-        threshold = np.percentile(max_per_angle, 25.0)
-        valid = (max_per_angle >= threshold) & (peaks_idx > 0) & (
-            peaks_idx < (polar.shape[1] - 1)
-        )
-        if np.count_nonzero(valid) < self._ANGLES_FAST:
-            raise RuntimeError("Not enough valid angles for manual scoring.")
+            polar = self._sample_polar(img, center, r_min, r_max, angles)
+            if polar.size == 0:
+                last_diag = {"reason": "polar_failed", "r_min": r_min, "r_max": r_max}
+                continue
+
+            peaks_idx = np.argmax(polar, axis=1)
+            max_per_angle = polar.max(axis=1)
+            step = (r_max - r_min) / max(1, (polar.shape[1] - 1))
+            peaks_r = r_min + peaks_idx * step
+
+            threshold = np.percentile(max_per_angle, float(thr_pct))
+            valid = max_per_angle >= threshold
+            if require_non_edge:
+                valid = valid & (peaks_idx > 0) & (peaks_idx < (polar.shape[1] - 1))
+
+            n_valid = int(np.count_nonzero(valid))
+            last_diag = {
+                "reason": "too_few_valid" if n_valid < self._ANGLES_FAST else "ok",
+                "band_scale": float(band_scale),
+                "thr_pct": float(thr_pct),
+                "require_non_edge": bool(require_non_edge),
+                "n_valid": n_valid,
+                "angles_count": int(angles_count),
+                "radius": float(radius),
+                "r_min": float(r_min),
+                "r_max": float(r_max),
+            }
+            if n_valid >= self._ANGLES_FAST:
+                break
+
+        if last_diag is None or last_diag.get("reason") != "ok":
+            diag = last_diag or {}
+            raise RuntimeError(
+                "Not enough valid angles for manual scoring. "
+                "Check `manual_center` / `manual_radius` and ROI cropping. "
+                f"diag={diag}"
+            )
 
         peaks_valid = peaks_r[valid].astype(np.float32)
         score = float(np.std(peaks_valid))
@@ -951,9 +987,12 @@ class DonutOptimizationWindow(QtWidgets.QDialog):
         self.lbl_roi = QtWidgets.QLabel("ROI: not set")
         self.btn_select_roi = QtWidgets.QPushButton("Select ROI")
         self.btn_select_roi.clicked.connect(self._select_roi)
+        self.btn_clear_roi = QtWidgets.QPushButton("Clear ROI")
+        self.btn_clear_roi.clicked.connect(self._clear_roi)
         roi_layout.addWidget(self.lbl_roi)
         roi_layout.addStretch(1)
         roi_layout.addWidget(self.btn_select_roi)
+        roi_layout.addWidget(self.btn_clear_roi)
         layout.addWidget(roi_group)
 
         manual_group = QtWidgets.QGroupBox("2) Manual Target")
@@ -1097,7 +1136,13 @@ class DonutOptimizationWindow(QtWidgets.QDialog):
         self._camera.begin_roi_selection()
 
     def _on_roi_changed(self, roi: Tuple[int, int, int, int]) -> None:
-        self.lbl_roi.setText(f"ROI: {roi}")
+        if roi is None:
+            self.lbl_roi.setText("ROI: not set")
+        else:
+            self.lbl_roi.setText(f"ROI: {roi}")
+
+    def _clear_roi(self) -> None:
+        self._camera.clear_roi()
 
     def _pick_dark_spot(self) -> None:
         if not self._camera.is_running():
@@ -1112,7 +1157,8 @@ class DonutOptimizationWindow(QtWidgets.QDialog):
         if self._manual_center is None:
             self._append_error("Pick the dark spot center first.")
             return
-        self._camera.begin_circle_selection(self._manual_center)
+        # Circle selection should be independent from the picked dark-spot center.
+        self._camera.begin_circle_selection()
 
     def _clear_manual_target(self) -> None:
         self._manual_center = None
@@ -1129,11 +1175,10 @@ class DonutOptimizationWindow(QtWidgets.QDialog):
 
     def _on_circle_selected(self, circle: Tuple[float, float, float]) -> None:
         cx, cy, r = circle
-        self._manual_center = (float(cx), float(cy))
         self._manual_radius = float(r)
         self._update_manual_labels()
         self._append_log(
-            f"Donut circle set: center=({cx:.1f}, {cy:.1f}) radius={r:.1f}"
+            f"Donut circle set: radius={r:.1f} px (drawn at ({cx:.1f}, {cy:.1f}))"
         )
 
     def _update_manual_labels(self) -> None:

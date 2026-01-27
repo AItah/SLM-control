@@ -58,6 +58,41 @@ def ensure_parent_dir(path: Path):
 def exception_to_text(e: BaseException) -> str:
     return "".join(traceback.format_exception(type(e), e, e.__traceback__))
 
+
+def _apply_dark_theme(app: QtWidgets.QApplication) -> None:
+    """Force a consistent dark theme regardless of system settings."""
+    app.setStyle("Fusion")
+    palette = QtGui.QPalette()
+    # Base palette
+    palette.setColor(QtGui.QPalette.Window, QtGui.QColor(18, 18, 18))
+    palette.setColor(QtGui.QPalette.WindowText, QtGui.QColor(224, 224, 224))
+    palette.setColor(QtGui.QPalette.Base, QtGui.QColor(30, 30, 30))
+    palette.setColor(QtGui.QPalette.AlternateBase, QtGui.QColor(37, 37, 37))
+    palette.setColor(QtGui.QPalette.Text, QtGui.QColor(224, 224, 224))
+    palette.setColor(QtGui.QPalette.Button, QtGui.QColor(44, 44, 44))
+    palette.setColor(QtGui.QPalette.ButtonText, QtGui.QColor(224, 224, 224))
+    palette.setColor(QtGui.QPalette.ToolTipBase, QtGui.QColor(37, 37, 37))
+    palette.setColor(QtGui.QPalette.ToolTipText, QtGui.QColor(224, 224, 224))
+    palette.setColor(QtGui.QPalette.BrightText, QtGui.QColor(255, 85, 85))
+    # Highlights / links
+    highlight = QtGui.QColor(61, 139, 253)
+    palette.setColor(QtGui.QPalette.Highlight, highlight)
+    palette.setColor(QtGui.QPalette.HighlightedText, QtGui.QColor(0, 0, 0))
+    palette.setColor(QtGui.QPalette.Link, QtGui.QColor(97, 175, 239))
+    palette.setColor(QtGui.QPalette.LinkVisited, QtGui.QColor(128, 170, 255))
+    # Disabled state tweaks
+    palette.setColor(QtGui.QPalette.Disabled, QtGui.QPalette.Text, QtGui.QColor(130, 130, 130))
+    palette.setColor(QtGui.QPalette.Disabled, QtGui.QPalette.ButtonText, QtGui.QColor(130, 130, 130))
+    app.setPalette(palette)
+    # Subtle tooltip styling
+    app.setStyleSheet(
+        "QToolTip {"
+        " color: #e0e0e0;"
+        " background-color: #2c2c2c;"
+        " border: 1px solid #3d3d3d;"
+        "}"
+    )
+
 # ---------------------- GS Progress Window ----------------------
 
 
@@ -1497,6 +1532,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
 def main():
     app = QtWidgets.QApplication(sys.argv)
+    _apply_dark_theme(app)
     QtCore.QCoreApplication.setOrganizationName("STED")
     QtCore.QCoreApplication.setApplicationName("SLMControl")
 

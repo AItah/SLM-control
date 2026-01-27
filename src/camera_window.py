@@ -324,6 +324,16 @@ class CameraWindow(QtWidgets.QWidget):
         self._roi_selecting = True
         self._append_log("Drag to select ROI on the image.")
 
+    def clear_roi(self) -> None:
+        """Clear ROI selection (revert to full frame)."""
+        with self._roi_lock:
+            self._roi = None
+        if self._roi_band is not None:
+            self._roi_band.hide()
+        self.roi_changed.emit(None)
+        self._append_log("ROI cleared.")
+        self._refresh_last_frame()
+
     def begin_point_selection(self) -> None:
         if self._thread is None:
             self._append_error("Camera is not running.")
@@ -390,7 +400,6 @@ class CameraWindow(QtWidgets.QWidget):
                     pos = self._label_pos_to_image(event.position())
                     if pos is not None:
                         self._selected_point = (float(pos[0]), float(pos[1]))
-                        self._selected_circle_center = self._selected_point
                         self._point_selecting = False
                         self.point_selected.emit(self._selected_point)
                         self._refresh_last_frame()
