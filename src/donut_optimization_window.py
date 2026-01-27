@@ -663,6 +663,7 @@ class CostScanWorker(QtCore.QObject):
     progress = QtCore.Signal(int, int)
     finished = QtCore.Signal(float, float, str)
     failed = QtCore.Signal(str)
+    dark_center = QtCore.Signal(object)
     debug_data = QtCore.Signal(object, object, object, object, object, object)
 
     def __init__(
@@ -678,6 +679,10 @@ class CostScanWorker(QtCore.QObject):
         self._camera = camera
         self._settings = settings
         self._running = True
+        self._current_dark = (
+            float(self._settings.dark_hint[0]),
+            float(self._settings.dark_hint[1]),
+        )
 
     @QtCore.Slot()
     def run(self) -> None:
@@ -759,7 +764,14 @@ class CostScanWorker(QtCore.QObject):
         x0c, y0c, _, _ = OffsetScanWorker._circle_crop_bounds(
             gray.shape[:2], (cx, cy), radius
         )
-        dark_x, dark_y = self._settings.dark_hint
+        dark_center, _, _ = OffsetScanWorker._find_dark_spot_cv2(
+            gray, self._current_dark, OffsetScanWorker._DARK_ROI_PX
+        )
+        if dark_center is not None:
+            self._current_dark = (float(dark_center[0]), float(dark_center[1]))
+            self.dark_center.emit(self._current_dark)
+
+        dark_x, dark_y = self._current_dark
         center_in_crop = (float(dark_x - x0c), float(dark_y - y0c))
 
         cost = self._donut_cost(
@@ -1897,6 +1909,7 @@ class DonutOptimizationWindow(QtWidgets.QDialog):
             self._worker.failed.connect(self._on_failed)
             self._worker.finished.connect(self._on_scan_finished)
             self._worker.debug_data.connect(self._on_debug_data)
+            self._worker.dark_center.connect(self._on_dark_center_update)
         else:
             self._worker = OffsetScanWorker(self._vortex, self._slm, self._camera, settings)
             self._worker.moveToThread(self._thread)
