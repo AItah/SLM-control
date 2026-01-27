@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Optional, Tuple
 
 import numpy as np
+from refine_dark_spot import refine_dark_spot
 from PySide6 import QtCore, QtGui, QtWidgets
 
 try:
@@ -33,6 +34,8 @@ class ScanSettings:
     dark_hint: Tuple[float, float]
     pixel_size_mm: float
     threshold_px: float
+    filter_enabled: bool
+    filter_threshold: float
 
 
 class OffsetScanWorker(QtCore.QObject):
@@ -198,11 +201,17 @@ class OffsetScanWorker(QtCore.QObject):
             raise RuntimeError("No camera frame available.")
 
         gray = self._to_gray(frame)
+        if self._settings.filter_enabled:
+            thr = float(self._settings.filter_threshold)
+            gray = gray.copy()
+            gray[gray < thr] = 0.0
         cx, cy = self._settings.circle_center
         radius = float(self._settings.circle_radius)
 
         hx, hy = self._current_dark
-        dark_center, dark_diam = self._find_dark_spot_cv2(gray, (hx, hy))
+        dark_center, dark_diam, dark_dbg = OffsetScanWorker._find_dark_spot_cv2(
+            gray, (hx, hy), self._DARK_ROI_PX
+        )
         if dark_center is None:
             dx = float(hx) - float(cx)
             dy = float(hy) - float(cy)
@@ -277,7 +286,10 @@ class OffsetScanWorker(QtCore.QObject):
                 "dark_center": dark_center,
                 "dark_width_px": float(dark_width),
                 "dark_diam_px": float(dark_diam) if dark_diam is not None else None,
+                "dark_dbg": dark_dbg,
             }
+            if self._settings.filter_enabled:
+                meta["filter_threshold"] = float(self._settings.filter_threshold)
             self.debug_data.emit(crop, overlay, None, None, meta, (profile_x_mm, vals))
 
         return float(score)
@@ -585,57 +597,13 @@ class OffsetScanWorker(QtCore.QObject):
             width = max(10.0, 0.2 * float(radius))
         return width
 
+    @staticmethod
     def _find_dark_spot_cv2(
-        self, img: np.ndarray, click: Tuple[float, float]
-    ) -> Tuple[Optional[Tuple[float, float]], Optional[float]]:
+        img: np.ndarray, click: Tuple[float, float], roi_size: int
+    ) -> Tuple[Optional[Tuple[float, float]], Optional[float], dict]:
         if cv2 is None:
-            return None, None
-        if img is None or img.size == 0:
-            return None, None
-        gray = self._normalize_to_u8(img)
-        h, w = gray.shape[:2]
-        cx = int(round(float(click[0])))
-        cy = int(round(float(click[1])))
-        roi_size = int(self._DARK_ROI_PX)
-        y1 = max(0, cy - roi_size)
-        y2 = min(h, cy + roi_size)
-        x1 = max(0, cx - roi_size)
-        x2 = min(w, cx + roi_size)
-        if x2 <= x1 or y2 <= y1:
-            return None, None
-        roi = gray[y1:y2, x1:x2]
-        min_dim = min(roi.shape[0], roi.shape[1])
-        if min_dim < 3:
-            return None, None
-        if min_dim % 2 == 0:
-            min_dim -= 1
-        block = max(3, min(51, min_dim))
-        thresh = cv2.adaptiveThreshold(
-            roi,
-            255,
-            cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-            cv2.THRESH_BINARY_INV,
-            block,
-            2,
-        )
-        contours, _ = cv2.findContours(
-            thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
-        )
-        if not contours:
-            return None, None
-        contour = max(contours, key=cv2.contourArea)
-        area = float(cv2.contourArea(contour))
-        if area <= 0:
-            return None, None
-        m = cv2.moments(contour)
-        if m["m00"] == 0:
-            return None, None
-        local_cx = float(m["m10"] / m["m00"])
-        local_cy = float(m["m01"] / m["m00"])
-        global_cx = float(x1 + local_cx)
-        global_cy = float(y1 + local_cy)
-        diameter = float(math.sqrt(4.0 * area / math.pi))
-        return (global_cx, global_cy), diameter
+            return None, None, {"stage": "cv2_missing"}
+        return refine_dark_spot(img, click[0], click[1], roi_size=roi_size)
 
     def _score_warp_polar(
         self, roi_gray: np.ndarray, center: Tuple[float, float]
@@ -1097,6 +1065,10 @@ class DebugWindow(QtWidgets.QDialog):
             lines.append(f"dark_width_px={meta['dark_width_px']:.3f}")
         if meta.get("dark_diam_px") is not None:
             lines.append(f"dark_diam_px={meta['dark_diam_px']:.3f}")
+        if meta.get("dark_dbg") is not None:
+            lines.append(f"dark_dbg={meta['dark_dbg']}")
+        if meta.get("filter_threshold") is not None:
+            lines.append(f"filter_threshold={meta['filter_threshold']}")
         if meta.get("score_px") is not None:
             lines.append(f"score_px={meta['score_px']:.3f}")
 
@@ -1287,11 +1259,18 @@ class DonutOptimizationWindow(QtWidgets.QDialog):
         self.btn_pick_circle.clicked.connect(self._pick_donut_circle)
         self.btn_analyze = QtWidgets.QPushButton("Donut analysis")
         self.btn_analyze.clicked.connect(self._run_donut_analysis)
+        self.btn_refine_dark = QtWidgets.QPushButton("Refine dark spot")
+        self.btn_refine_dark.clicked.connect(self._refine_dark_spot)
         self.dsb_px_um = QtWidgets.QDoubleSpinBox()
         self.dsb_px_um.setRange(0.01, 1000.0)
         self.dsb_px_um.setDecimals(4)
-        self.dsb_px_um.setValue(1.0)
+        self.dsb_px_um.setValue(3.45)
         self.dsb_px_um.setSuffix(" um/px")
+        self.chk_filter = QtWidgets.QCheckBox("Zero below threshold")
+        self.chk_filter.setChecked(False)
+        self.spin_filter = QtWidgets.QSpinBox()
+        self.spin_filter.setRange(0, 255)
+        self.spin_filter.setValue(10)
         self.btn_clear_manual = QtWidgets.QPushButton("Clear")
         self.btn_clear_manual.clicked.connect(self._clear_manual_target)
 
@@ -1302,7 +1281,10 @@ class DonutOptimizationWindow(QtWidgets.QDialog):
         manual_layout.addWidget(QtWidgets.QLabel("Camera pixel size"), 2, 0)
         manual_layout.addWidget(self.dsb_px_um, 2, 1)
         manual_layout.addWidget(self.btn_clear_manual, 0, 3, 2, 1)
-        manual_layout.addWidget(self.btn_analyze, 3, 0, 1, 4)
+        manual_layout.addWidget(self.chk_filter, 3, 0)
+        manual_layout.addWidget(self.spin_filter, 3, 1)
+        manual_layout.addWidget(self.btn_refine_dark, 2, 2, 1, 2)
+        manual_layout.addWidget(self.btn_analyze, 4, 0, 1, 4)
         layout.addWidget(manual_group)
 
         scan_group = QtWidgets.QGroupBox("2) Scan Settings (mm)")
@@ -1447,6 +1429,7 @@ class DonutOptimizationWindow(QtWidgets.QDialog):
         self._append_log(
             f"Dark spot set: ({self._manual_center[0]:.1f}, {self._manual_center[1]:.1f})"
         )
+        self._refine_dark_spot()
 
     def _on_circle_selected(self, circle: Tuple[float, float, float]) -> None:
         cx, cy, r = circle
@@ -1495,6 +1478,7 @@ class DonutOptimizationWindow(QtWidgets.QDialog):
             self._append_error("No camera frame available.")
             return
         gray = OffsetScanWorker._to_gray(frame)
+        gray = self._apply_filter(gray)
         cx, cy = self._circle_center
         radius = float(self._manual_radius)
         crop = OffsetScanWorker._crop_circle_mask(gray, (cx, cy), radius)
@@ -1520,6 +1504,8 @@ class DonutOptimizationWindow(QtWidgets.QDialog):
             "r_max": float(radius),
             "profile_x_mm": (float(profile_x_mm[0]), float(profile_x_mm[-1])),
         }
+        if self.chk_filter.isChecked():
+            meta["filter_threshold"] = int(self.spin_filter.value())
         if self._debug_window is None:
             self._debug_window = DebugWindow(self)
         self._debug_window.update_views(
@@ -1529,6 +1515,40 @@ class DonutOptimizationWindow(QtWidgets.QDialog):
         self._debug_window.raise_()
         self._debug_window.activateWindow()
         self._append_log("Donut analysis: plotted circle crop.")
+
+    def _refine_dark_spot(self) -> None:
+        if not self._camera.is_running():
+            self._append_error("Camera must be running.")
+            return
+        if self._manual_center is None:
+            self._append_error("Please pick the dark spot center first.")
+            return
+        frame = self._camera.get_last_frame()
+        if frame is None:
+            self._append_error("No camera frame available.")
+            return
+        gray = OffsetScanWorker._to_gray(frame)
+        gray = self._apply_filter(gray)
+        dark_center, _, dark_dbg = OffsetScanWorker._find_dark_spot_cv2(
+            gray, self._manual_center, OffsetScanWorker._DARK_ROI_PX
+        )
+        if dark_center is None:
+            self._append_error(f"Dark spot refinement failed. dbg={dark_dbg}")
+            return
+        self._manual_center = (float(dark_center[0]), float(dark_center[1]))
+        self._update_manual_labels()
+        self._camera.set_selected_point(self._manual_center, emit=False)
+        self._append_log(
+            f"Dark spot refined: ({self._manual_center[0]:.1f}, {self._manual_center[1]:.1f})"
+        )
+
+    def _apply_filter(self, img: np.ndarray) -> np.ndarray:
+        if not self.chk_filter.isChecked():
+            return img
+        thr = float(self.spin_filter.value())
+        out = img.copy()
+        out[out < thr] = 0.0
+        return out
 
     @staticmethod
     def _draw_angle_lines(
@@ -1629,6 +1649,8 @@ class DonutOptimizationWindow(QtWidgets.QDialog):
             dark_hint=(float(self._manual_center[0]), float(self._manual_center[1])),
             pixel_size_mm=float(self.dsb_px_um.value()) * 1e-3,
             threshold_px=OffsetScanWorker._TARGET_DIST_PX,
+            filter_enabled=self.chk_filter.isChecked(),
+            filter_threshold=float(self.spin_filter.value()),
         )
 
         self._thread = QtCore.QThread(self)
