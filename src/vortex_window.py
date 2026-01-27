@@ -360,8 +360,64 @@ class VortexWindow(QtWidgets.QWidget):
         self.dsb_offset_x_mm.setValue(float(x_mm))
         self.dsb_offset_y_mm.setValue(float(y_mm))
 
+    def get_zernike_values(self) -> tuple[float, float, float, float, float]:
+        return (
+            float(self.dsb_astig_v.value()),
+            float(self.dsb_astig_o.value()),
+            float(self.dsb_coma_x.value()),
+            float(self.dsb_coma_y.value()),
+            float(self.dsb_spher.value()),
+        )
+
+    def set_zernike_values(
+        self,
+        astig_v: Optional[float] = None,
+        astig_o: Optional[float] = None,
+        coma_x: Optional[float] = None,
+        coma_y: Optional[float] = None,
+        spher: Optional[float] = None,
+    ) -> None:
+        if astig_v is not None:
+            self.dsb_astig_v.setValue(float(astig_v))
+        if astig_o is not None:
+            self.dsb_astig_o.setValue(float(astig_o))
+        if coma_x is not None:
+            self.dsb_coma_x.setValue(float(coma_x))
+        if coma_y is not None:
+            self.dsb_coma_y.setValue(float(coma_y))
+        if spher is not None:
+            self.dsb_spher.setValue(float(spher))
+
+    def build_mask_with_params(
+        self,
+        offset_x_mm: Optional[float] = None,
+        offset_y_mm: Optional[float] = None,
+        c_astig_v: Optional[float] = None,
+        c_astig_o: Optional[float] = None,
+        c_coma_y: Optional[float] = None,
+        c_coma_x: Optional[float] = None,
+        c_spher: Optional[float] = None,
+    ) -> np.ndarray:
+        result, _ = self._build_mask_from_ui(
+            offset_x_mm=offset_x_mm,
+            offset_y_mm=offset_y_mm,
+            c_astig_v=c_astig_v,
+            c_astig_o=c_astig_o,
+            c_coma_y=c_coma_y,
+            c_coma_x=c_coma_x,
+            c_spher=c_spher,
+        )
+        return result.mask_u8
+
     def _build_mask_from_ui(
-        self, offset_x_mm: Optional[float] = None, offset_y_mm: Optional[float] = None
+        self,
+        offset_x_mm: Optional[float] = None,
+        offset_y_mm: Optional[float] = None,
+        c_astig_v: Optional[float] = None,
+        c_astig_o: Optional[float] = None,
+        c_coma_y: Optional[float] = None,
+        c_coma_x: Optional[float] = None,
+        c_spher: Optional[float] = None,
     ):
         slm = self._ensure_params()
         if slm is None:
@@ -420,11 +476,21 @@ class VortexWindow(QtWidgets.QWidget):
             sft_y_m=sft_y_m,
             zernike_offset_x_m=sft_x_m,
             zernike_offset_y_m=sft_y_m,
-            c_astig_v=float(self.dsb_astig_v.value()),
-            c_astig_o=float(self.dsb_astig_o.value()),
-            c_coma_y=float(self.dsb_coma_y.value()),
-            c_coma_x=float(self.dsb_coma_x.value()),
-            c_spher=float(self.dsb_spher.value()),
+            c_astig_v=float(self.dsb_astig_v.value())
+            if c_astig_v is None
+            else float(c_astig_v),
+            c_astig_o=float(self.dsb_astig_o.value())
+            if c_astig_o is None
+            else float(c_astig_o),
+            c_coma_y=float(self.dsb_coma_y.value())
+            if c_coma_y is None
+            else float(c_coma_y),
+            c_coma_x=float(self.dsb_coma_x.value())
+            if c_coma_x is None
+            else float(c_coma_x),
+            c_spher=float(self.dsb_spher.value())
+            if c_spher is None
+            else float(c_spher),
             use_zernike=self.chk_use_zernike.isChecked(),
             steer_req=steer_req,
             use_forked=use_fork,

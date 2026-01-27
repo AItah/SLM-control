@@ -39,6 +39,7 @@ class ScanSettings:
     filter_enabled: bool
     filter_threshold: float
     fast_search: bool
+    scan_mode: str
 
 
 class OffsetScanWorker(QtCore.QObject):
@@ -703,50 +704,47 @@ class CostScanWorker(QtCore.QObject):
         return self._run_snake_scan()
 
     def _run_snake_scan(self) -> Tuple[float, float, str]:
-        center_x, center_y = self._vortex.get_offsets_mm()
-        xs = OffsetScanWorker._build_offsets(
-            center_x, self._settings.x_range_mm, self._settings.x_step_mm
-        )
-        ys = OffsetScanWorker._build_offsets(
-            center_y, self._settings.y_range_mm, self._settings.y_step_mm
-        )
+        xs, ys, labels, base = self._scan_grid()
         total = max(1, len(xs) * len(ys))
         count = 0
 
         results: list[tuple[float, float, float]] = []
         best_cost = float("inf")
-        best_x, best_y = center_x, center_y
+        best_a = xs[0] if xs else 0.0
+        best_b = ys[0] if ys else 0.0
 
-        for row, y_mm in enumerate(ys):
+        for row, b_val in enumerate(ys):
             if not self._running:
                 raise RuntimeError("Scan canceled.")
             row_xs = xs if (row % 2 == 0) else list(reversed(xs))
-            for x_mm in row_xs:
+            for a_val in row_xs:
                 if not self._running:
                     raise RuntimeError("Scan canceled.")
-                cost = self._evaluate_cost(x_mm, y_mm)
-                results.append((x_mm, y_mm, cost))
+                cost = self._evaluate_cost(a_val, b_val, base)
+                results.append((a_val, b_val, cost))
                 if cost < best_cost:
                     best_cost = cost
-                    best_x, best_y = x_mm, y_mm
+                    best_a, best_b = a_val, b_val
                 count += 1
                 self.progress.emit(min(count, total), total)
                 self.log.emit(
-                    f"Scan x={x_mm:.3f} mm y={y_mm:.3f} mm cost={cost:.4f}"
+                    f"Scan {labels[0]}={a_val:.3f} {labels[1]}={b_val:.3f} cost={cost:.4f}"
                 )
 
-        csv_path = self._write_csv(results)
+        csv_path = self._write_csv(results, labels)
         self.log.emit(
-            f"Scan complete. Best cost={best_cost:.4f} at x={best_x:.3f} y={best_y:.3f}"
+            f"Scan complete. Best cost={best_cost:.4f} at {labels[0]}={best_a:.3f} {labels[1]}={best_b:.3f}"
         )
-        return best_x, best_y, csv_path
+        return best_a, best_b, csv_path
 
     def _run_fast_search(self) -> Tuple[float, float, str]:
-        center_x, center_y = self._vortex.get_offsets_mm()
-        bound_x_lo = center_x - self._settings.x_range_mm
-        bound_x_hi = center_x + self._settings.x_range_mm
-        bound_y_lo = center_y - self._settings.y_range_mm
-        bound_y_hi = center_y + self._settings.y_range_mm
+        xs, ys, labels, base = self._scan_grid()
+        center_x = xs[len(xs) // 2] if xs else 0.0
+        center_y = ys[len(ys) // 2] if ys else 0.0
+        bound_x_lo = min(xs) if xs else center_x
+        bound_x_hi = max(xs) if xs else center_x
+        bound_y_lo = min(ys) if ys else center_y
+        bound_y_hi = max(ys) if ys else center_y
 
         step_x = float(self._settings.x_step_mm)
         step_y = float(self._settings.y_step_mm)
@@ -755,10 +753,10 @@ class CostScanWorker(QtCore.QObject):
 
         results: list[tuple[float, float, float]] = []
         best_x, best_y = center_x, center_y
-        best_cost = self._evaluate_cost(best_x, best_y)
+        best_cost = self._evaluate_cost(best_x, best_y, base)
         results.append((best_x, best_y, best_cost))
         self.log.emit(
-            f"Fast search start x={best_x:.3f} y={best_y:.3f} cost={best_cost:.4f}"
+            f"Fast search start {labels[0]}={best_x:.3f} {labels[1]}={best_y:.3f} cost={best_cost:.4f}"
         )
 
         progress_est = max(
@@ -780,6 +778,7 @@ class CostScanWorker(QtCore.QObject):
                 results=results,
                 count=count,
                 total=progress_est,
+                base=base,
             )
 
             best_x, best_y, best_cost, step_y, count, improved_y = self._walk_axis(
@@ -792,12 +791,13 @@ class CostScanWorker(QtCore.QObject):
                 results=results,
                 count=count,
                 total=progress_est,
+                base=base,
             )
             improved = improved or improved_y
 
-        csv_path = self._write_csv(results)
+        csv_path = self._write_csv(results, labels)
         self.log.emit(
-            f"Fast search complete. Best cost={best_cost:.4f} at x={best_x:.3f} y={best_y:.3f}"
+            f"Fast search complete. Best cost={best_cost:.4f} at {labels[0]}={best_x:.3f} {labels[1]}={best_y:.3f}"
         )
         return best_x, best_y, csv_path
 
@@ -812,6 +812,7 @@ class CostScanWorker(QtCore.QObject):
         results: list[tuple[float, float, float]],
         count: int,
         total: int,
+        base: dict,
     ) -> Tuple[float, float, float, float, int, bool]:
         if step < min_step:
             return center[0], center[1], best_cost, step, count, False
@@ -826,7 +827,7 @@ class CostScanWorker(QtCore.QObject):
                 continue
             cx = cand if axis == "x" else x
             cy = cand if axis == "y" else y
-            cost = self._evaluate_cost(cx, cy)
+            cost = self._evaluate_cost(cx, cy, base)
             results.append((cx, cy, cost))
             count += 1
             self.progress.emit(min(count, total), total)
@@ -851,7 +852,7 @@ class CostScanWorker(QtCore.QObject):
                 break
             cx = cand if axis == "x" else x
             cy = cand if axis == "y" else y
-            cost = self._evaluate_cost(cx, cy)
+            cost = self._evaluate_cost(cx, cy, base)
             results.append((cx, cy, cost))
             count += 1
             self.progress.emit(min(count, total), total)
@@ -869,9 +870,43 @@ class CostScanWorker(QtCore.QObject):
 
         return x, y, best_cost, step, count, improved
 
-    def _evaluate_cost(self, offset_x_mm: float, offset_y_mm: float) -> float:
+    def _evaluate_cost(self, a_val: float, b_val: float, base: dict) -> float:
         prev_time = self._camera.get_last_frame_time()
-        mask_u8 = self._vortex.build_mask(offset_x_mm, offset_y_mm)
+        mode = self._settings.scan_mode
+        if mode == "shift":
+            mask_u8 = self._vortex.build_mask_with_params(
+                offset_x_mm=a_val, offset_y_mm=b_val
+            )
+        elif mode == "astig":
+            mask_u8 = self._vortex.build_mask_with_params(
+                offset_x_mm=base["offset_x_mm"],
+                offset_y_mm=base["offset_y_mm"],
+                c_astig_v=a_val,
+                c_astig_o=b_val,
+                c_coma_y=base["c_coma_y"],
+                c_coma_x=base["c_coma_x"],
+                c_spher=base["c_spher"],
+            )
+        elif mode == "coma":
+            mask_u8 = self._vortex.build_mask_with_params(
+                offset_x_mm=base["offset_x_mm"],
+                offset_y_mm=base["offset_y_mm"],
+                c_astig_v=base["c_astig_v"],
+                c_astig_o=base["c_astig_o"],
+                c_coma_y=b_val,
+                c_coma_x=a_val,
+                c_spher=base["c_spher"],
+            )
+        else:
+            mask_u8 = self._vortex.build_mask_with_params(
+                offset_x_mm=base["offset_x_mm"],
+                offset_y_mm=base["offset_y_mm"],
+                c_astig_v=base["c_astig_v"],
+                c_astig_o=base["c_astig_o"],
+                c_coma_y=base["c_coma_y"],
+                c_coma_x=base["c_coma_x"],
+                c_spher=a_val,
+            )
         ok = self._slm.send_mask_to_slot(mask_u8, self._settings.slot)
         if not ok:
             raise RuntimeError("Failed to send mask to SLM.")
@@ -943,6 +978,44 @@ class CostScanWorker(QtCore.QObject):
 
         return float(cost)
 
+    def _scan_grid(self) -> tuple[list[float], list[float], tuple[str, str], dict]:
+        off_x, off_y = self._vortex.get_offsets_mm()
+        astig_v, astig_o, coma_x, coma_y, spher = self._vortex.get_zernike_values()
+        base = {
+            "offset_x_mm": off_x,
+            "offset_y_mm": off_y,
+            "c_astig_v": astig_v,
+            "c_astig_o": astig_o,
+            "c_coma_x": coma_x,
+            "c_coma_y": coma_y,
+            "c_spher": spher,
+        }
+
+        mode = self._settings.scan_mode
+        if mode == "shift":
+            center_x, center_y = off_x, off_y
+            labels = ("x_mm", "y_mm")
+        elif mode == "astig":
+            center_x, center_y = astig_v, astig_o
+            labels = ("astig_v", "astig_o")
+        elif mode == "coma":
+            center_x, center_y = coma_x, coma_y
+            labels = ("coma_x", "coma_y")
+        else:
+            center_x, center_y = spher, spher
+            labels = ("spher", "fixed")
+
+        xs = OffsetScanWorker._build_offsets(
+            center_x, self._settings.x_range_mm, self._settings.x_step_mm
+        )
+        if mode == "spher":
+            ys = [center_y]
+        else:
+            ys = OffsetScanWorker._build_offsets(
+                center_y, self._settings.y_range_mm, self._settings.y_step_mm
+            )
+        return xs, ys, labels, base
+
     @staticmethod
     def _donut_cost(
         img_gray: np.ndarray,
@@ -973,12 +1046,12 @@ class CostScanWorker(QtCore.QObject):
         return asymmetry_score + (center_leakage * 10.0)
 
     @staticmethod
-    def _write_csv(results: list[tuple[float, float, float]]) -> str:
+    def _write_csv(results: list[tuple[float, float, float]], labels: tuple[str, str]) -> str:
         ts = time.strftime("%Y%m%d_%H%M%S")
         path = Path.cwd() / f"donut_scan_{ts}.csv"
         with path.open("w", newline="", encoding="utf-8") as f:
             writer = csv.writer(f)
-            writer.writerow(["x_mm", "y_mm", "cost"])
+            writer.writerow([labels[0], labels[1], "cost"])
             writer.writerows(results)
         return str(path)
 
@@ -1723,6 +1796,26 @@ class DonutOptimizationWindow(QtWidgets.QDialog):
         self.chk_fast_search = QtWidgets.QCheckBox("Use fast search")
         self.chk_fast_search.setChecked(False)
         scan_layout.addWidget(self.chk_fast_search, r, 2, 1, 2)
+        r += 1
+        self.rb_scan_shift = QtWidgets.QRadioButton("Shift")
+        self.rb_scan_astig = QtWidgets.QRadioButton("Astigmatism")
+        self.rb_scan_coma = QtWidgets.QRadioButton("Coma")
+        self.rb_scan_spher = QtWidgets.QRadioButton("Spherical")
+        self.rb_scan_shift.setChecked(True)
+        self.scan_group = QtWidgets.QButtonGroup(self)
+        for rb in (
+            self.rb_scan_shift,
+            self.rb_scan_astig,
+            self.rb_scan_coma,
+            self.rb_scan_spher,
+        ):
+            self.scan_group.addButton(rb)
+        scan_layout.addWidget(QtWidgets.QLabel("Scan mode"), r, 0)
+        scan_layout.addWidget(self.rb_scan_shift, r, 1)
+        scan_layout.addWidget(self.rb_scan_astig, r, 2)
+        scan_layout.addWidget(self.rb_scan_coma, r, 3)
+        r += 1
+        scan_layout.addWidget(self.rb_scan_spher, r, 1)
 
         layout.addWidget(scan_group)
 
@@ -2005,6 +2098,7 @@ class DonutOptimizationWindow(QtWidgets.QDialog):
             filter_enabled=self.chk_filter.isChecked(),
             filter_threshold=float(self.spin_filter.value()),
             fast_search=self.chk_fast_search.isChecked(),
+            scan_mode=self._get_scan_mode(),
         )
 
         self._thread = QtCore.QThread(self)
@@ -2053,11 +2147,25 @@ class DonutOptimizationWindow(QtWidgets.QDialog):
         self._stop()
 
     def _on_scan_finished(self, best_x: float, best_y: float, csv_path: str) -> None:
-        self._append_log(
-            f"Scan complete. Best X={best_x:.3f} mm, Y={best_y:.3f} mm"
-        )
+        mode = self._get_scan_mode()
+        if mode == "shift":
+            msg = f"Scan complete. Best X={best_x:.3f} mm, Y={best_y:.3f} mm"
+        elif mode == "astig":
+            msg = f"Scan complete. Best astig_v={best_x:.3f}, astig_o={best_y:.3f}"
+        elif mode == "coma":
+            msg = f"Scan complete. Best coma_x={best_x:.3f}, coma_y={best_y:.3f}"
+        else:
+            msg = f"Scan complete. Best spherical={best_x:.3f}"
+        self._append_log(msg)
         self._append_log(f"Saved scan CSV: {csv_path}")
-        self._vortex.set_offsets_mm(best_x, best_y)
+        if mode == "shift":
+            self._vortex.set_offsets_mm(best_x, best_y)
+        elif mode == "astig":
+            self._vortex.set_zernike_values(astig_v=best_x, astig_o=best_y)
+        elif mode == "coma":
+            self._vortex.set_zernike_values(coma_x=best_x, coma_y=best_y)
+        else:
+            self._vortex.set_zernike_values(spher=best_x)
         self._stop()
 
     def _on_failed(self, msg: str) -> None:
@@ -2069,6 +2177,15 @@ class DonutOptimizationWindow(QtWidgets.QDialog):
 
     def _append_error(self, text: str) -> None:
         self.log.appendPlainText("ERROR: " + text)
+
+    def _get_scan_mode(self) -> str:
+        if self.rb_scan_astig.isChecked():
+            return "astig"
+        if self.rb_scan_coma.isChecked():
+            return "coma"
+        if self.rb_scan_spher.isChecked():
+            return "spher"
+        return "shift"
 
     def _open_debug(self) -> None:
         if self._debug_window is None:
