@@ -24,18 +24,15 @@ class ScanSettings:
     x_step_mm: float
     y_range_mm: float
     y_step_mm: float
-    refine_enabled: bool
-    refine_x_range_mm: float
-    refine_x_step_mm: float
-    refine_y_range_mm: float
-    refine_y_step_mm: float
     settle_ms: int
     slot: int
     debug_enabled: bool
     angles_count: int
-    # Reference center used for scoring (a user-provided hint; not assumed exact)
-    manual_center: Tuple[float, float]
-    manual_radius: float
+    circle_center: Tuple[float, float]
+    circle_radius: float
+    dark_hint: Tuple[float, float]
+    pixel_size_mm: float
+    threshold_px: float
 
 
 class OffsetScanWorker(QtCore.QObject):
@@ -43,25 +40,31 @@ class OffsetScanWorker(QtCore.QObject):
     progress = QtCore.Signal(int, int)
     finished = QtCore.Signal(float, float)
     failed = QtCore.Signal(str)
-    debug_data = QtCore.Signal(object, object, object, object, object)
+    debug_data = QtCore.Signal(object, object, object, object, object, object)
     _ANGLES_FAST = 4
     _MAX_WORSE_STREAK = 2
+    _TARGET_DIST_PX = 2.0
+    _MIN_STEP_FRACTION = 0.1
+    _DARK_SEARCH_FRAC = 0.6
 
     def __init__(
         self,
         vortex: VortexWindow,
         slm: SlmControlWindow,
         camera: CameraWindow,
-        roi: Tuple[int, int, int, int],
         settings: ScanSettings,
     ) -> None:
         super().__init__()
         self._vortex = vortex
         self._slm = slm
         self._camera = camera
-        self._roi = roi
         self._settings = settings
         self._running = True
+        cx, cy = self._settings.circle_center
+        hx, hy = self._settings.dark_hint
+        dx = float(hx) - float(cx)
+        dy = float(hy) - float(cy)
+        self._base_angle = math.atan2(dy, dx) if (dx != 0.0 or dy != 0.0) else 0.0
 
     @QtCore.Slot()
     def run(self) -> None:
@@ -94,23 +97,6 @@ class OffsetScanWorker(QtCore.QObject):
             step=self._settings.y_step_mm,
         )
 
-        if self._settings.refine_enabled:
-            self.log.emit("Starting refinement pass...")
-            best_x = self._scan_axis(
-                axis="x",
-                center=best_x,
-                fixed=best_y,
-                rng=self._settings.refine_x_range_mm,
-                step=self._settings.refine_x_step_mm,
-            )
-            best_y = self._scan_axis(
-                axis="y",
-                center=best_y,
-                fixed=best_x,
-                rng=self._settings.refine_y_range_mm,
-                step=self._settings.refine_y_step_mm,
-            )
-
         return best_x, best_y
 
     def _scan_axis(self, axis: str, center: float, fixed: float, rng: float, step: float) -> float:
@@ -118,15 +104,13 @@ class OffsetScanWorker(QtCore.QObject):
             raise ValueError("Step must be > 0.")
         if rng <= 0:
             return center
-
-        angles_full = max(self._ANGLES_FAST, int(self._settings.angles_count))
         bound_lo = center - rng
         bound_hi = center + rng
-        max_steps = int(math.floor(rng / step))
-        total_est = max(1, 3 + max_steps)
+        min_step = max(step * self._MIN_STEP_FRACTION, 0.001)
+        total_est = max(1, int(math.ceil(rng / max(min_step, 1e-6))))
         eval_count = 0
 
-        def eval_offset(offset: float, angles: int) -> float:
+        def eval_offset(offset: float) -> float:
             nonlocal eval_count
             if not self._running:
                 raise RuntimeError("Scan canceled.")
@@ -134,73 +118,51 @@ class OffsetScanWorker(QtCore.QObject):
                 off_x, off_y = offset, fixed
             else:
                 off_x, off_y = fixed, offset
-            score = self._evaluate_offset(off_x, off_y, angles)
+            score = self._evaluate_offset(off_x, off_y)
             eval_count += 1
             self.progress.emit(min(eval_count, total_est), total_est)
             self.log.emit(
-                f"{axis.upper()} {offset:.3f} mm -> score {score:.3f} (angles {angles})"
+                f"{axis.upper()} {offset:.3f} mm -> dist {score:.3f} px"
             )
             return score
 
-        best_offset = center
-        center_score = eval_offset(center, self._ANGLES_FAST)
-        best_score = center_score
+        current = center
+        current_score = eval_offset(current)
+        if current_score <= self._settings.threshold_px:
+            self.log.emit(
+                f"{axis.upper()} within threshold at {current:.3f} mm (dist {current_score:.3f} px)"
+            )
+            return current
 
-        candidates = []
-        for direction in (-1.0, 1.0):
-            cand = center + direction * step
+        direction = 1.0
+        step_size = step
+        best_offset = current
+        best_score = current_score
+
+        while step_size >= min_step:
+            cand = current + direction * step_size
             if cand < bound_lo or cand > bound_hi:
+                direction *= -1.0
+                step_size *= 0.5
                 continue
-            score = eval_offset(cand, self._ANGLES_FAST)
-            candidates.append((score, direction, cand))
-            if score < best_score:
-                best_score = score
-                best_offset = cand
-
-        if not candidates:
-            self.log.emit(
-                f"Best {axis.upper()} = {best_offset:.3f} mm (score {best_score:.3f})"
-            )
-            return best_offset
-
-        candidates.sort(key=lambda item: item[0])
-        if candidates[0][0] >= center_score:
-            self.log.emit(
-                f"No improvement along {axis.upper()} axis; keeping center."
-            )
-            self.log.emit(
-                f"Best {axis.upper()} = {best_offset:.3f} mm (score {best_score:.3f})"
-            )
-            return best_offset
-
-        direction = candidates[0][1]
-        current = candidates[0][2]
-        current_score = candidates[0][0]
-        worse_streak = 0 if current_score <= best_score else 1
-        steps_taken = 1
-
-        while steps_taken < max_steps:
-            cand = current + direction * step
-            if cand < bound_lo or cand > bound_hi:
-                break
-            angles = angles_full if steps_taken >= 2 else self._ANGLES_FAST
-            score = eval_offset(cand, angles)
-            steps_taken += 1
-            if score < best_score:
-                best_score = score
-                best_offset = cand
-                worse_streak = 0
+            score = eval_offset(cand)
+            if score <= self._settings.threshold_px:
+                self.log.emit(
+                    f"{axis.upper()} reached threshold at {cand:.3f} mm (dist {score:.3f} px)"
+                )
+                return cand
+            if score < current_score:
+                current = cand
+                current_score = score
+                if score < best_score:
+                    best_score = score
+                    best_offset = cand
             else:
-                worse_streak += 1
-                if worse_streak >= self._MAX_WORSE_STREAK:
-                    self.log.emit(
-                        f"{axis.upper()} worsening twice; stopping early and backtracking."
-                    )
-                    break
-            current = cand
+                direction *= -1.0
+                step_size *= 0.5
 
         self.log.emit(
-            f"Best {axis.upper()} = {best_offset:.3f} mm (score {best_score:.3f})"
+            f"Best {axis.upper()} = {best_offset:.3f} mm (dist {best_score:.3f} px)"
         )
         return best_offset
 
@@ -213,9 +175,7 @@ class OffsetScanWorker(QtCore.QObject):
         count = int(round((end - start) / step)) + 1
         return [start + i * step for i in range(count)]
 
-    def _evaluate_offset(
-        self, offset_x_mm: float, offset_y_mm: float, angles_count: int
-    ) -> float:
+    def _evaluate_offset(self, offset_x_mm: float, offset_y_mm: float) -> float:
         prev_time = self._camera.get_last_frame_time()
         mask_u8 = self._vortex.build_mask(offset_x_mm, offset_y_mm)
         ok = self._slm.send_mask_to_slot(mask_u8, self._settings.slot)
@@ -236,30 +196,49 @@ class OffsetScanWorker(QtCore.QObject):
         if frame is None:
             raise RuntimeError("No camera frame available.")
 
-        x, y, w, h = self._roi
-        roi = frame[y : y + h, x : x + w]
-        if roi.size == 0:
-            raise RuntimeError("ROI is empty.")
+        gray = self._to_gray(frame)
+        cx, cy = self._settings.circle_center
+        radius = float(self._settings.circle_radius)
 
-        roi_gray = self._to_gray(roi)
-        cx_full, cy_full = self._settings.manual_center
-        radius = float(self._settings.manual_radius)
-        cx = float(cx_full) - float(x)
-        cy = float(cy_full) - float(y)
-        if not (0 <= cx < w and 0 <= cy < h):
-            raise RuntimeError("Manual center is outside the ROI.")
-
-        score, polar, peaks, valid, meta = self._score_manual_concentricity(
-            roi_gray, (cx, cy), radius, angles_count
-        )
+        t_px, vals = self._sample_line_profile_px(gray, (cx, cy), radius, self._base_angle)
+        if t_px.size == 0:
+            raise RuntimeError("Failed to compute cross-section.")
+        search_win = float(self._DARK_SEARCH_FRAC) * radius
+        mask = np.abs(t_px) <= search_win
+        if np.any(mask):
+            idx_local = int(np.argmin(vals[mask]))
+            t_min = float(t_px[mask][idx_local])
+            v_min = float(vals[mask][idx_local])
+        else:
+            idx_local = int(np.argmin(vals))
+            t_min = float(t_px[idx_local])
+            v_min = float(vals[idx_local])
+        score = abs(t_min)
 
         if self._settings.debug_enabled:
-            debug_crop = self._crop_circle_mask(roi_gray, (cx, cy), radius)
-            self.debug_data.emit(debug_crop, None, None, None, meta)
+            crop = self._crop_circle_mask(gray, (cx, cy), radius)
+            x0c, y0c, _, _ = self._circle_crop_bounds(
+                gray.shape[:2], (cx, cy), radius
+            )
+            center_in_crop = (float(cx - x0c), float(cy - y0c))
+            overlay = DonutOptimizationWindow._draw_angle_lines(
+                crop,
+                center_in_crop,
+                radius,
+                self._base_angle,
+                max(1, int(self._settings.angles_count)),
+            )
+            profile_x_mm = t_px * float(self._settings.pixel_size_mm)
+            meta = {
+                "center": (float(cx), float(cy)),
+                "radius": float(radius),
+                "profile_x_mm": (float(profile_x_mm[0]), float(profile_x_mm[-1])),
+                "dark_offset_px": float(t_min),
+                "dark_value": float(v_min),
+                "score_px": float(score),
+            }
+            self.debug_data.emit(crop, overlay, None, None, meta, (profile_x_mm, vals))
 
-        self.log.emit(
-            f"manual concentricity score={score:.3f} px (valid {int(np.count_nonzero(valid))}/{len(valid)})"
-        )
         return float(score)
 
     @staticmethod
@@ -492,6 +471,26 @@ class OffsetScanWorker(QtCore.QObject):
         sol, _, _, _ = np.linalg.lstsq(a, radii, rcond=None)
         r0, dx, dy = sol
         return float(r0), float(dx), float(dy)
+
+    @staticmethod
+    def _sample_line_profile_px(
+        img: np.ndarray,
+        center: Tuple[float, float],
+        radius: float,
+        angle: float,
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        if img is None or img.size == 0:
+            return np.zeros((0,), dtype=np.float32), np.zeros((0,), dtype=np.float32)
+        r = max(1.0, float(radius))
+        samples = int(max(50, round(2.0 * r)))
+        t = np.linspace(-r, r, samples, dtype=np.float32)
+        cx, cy = center
+        cos_t = math.cos(angle)
+        sin_t = math.sin(angle)
+        xs = cx + cos_t * t
+        ys = cy + sin_t * t
+        vals = OffsetScanWorker._bilinear_sample(img.astype(np.float32), xs, ys).ravel()
+        return t.astype(np.float32), vals
 
     def _score_warp_polar(
         self, roi_gray: np.ndarray, center: Tuple[float, float]
@@ -820,15 +819,18 @@ class DebugWindow(QtWidgets.QDialog):
 
         self._crop_pixmap: Optional[QtGui.QPixmap] = None
         self._lines_pixmap: Optional[QtGui.QPixmap] = None
+        self._profile_pixmap: Optional[QtGui.QPixmap] = None
 
         layout = QtWidgets.QGridLayout(self)
 
         self.lbl_crop_title = QtWidgets.QLabel("Circle crop (masked)")
         self.lbl_lines_title = QtWidgets.QLabel("Angle lines")
+        self.lbl_profile_title = QtWidgets.QLabel("Cross-section (first line)")
         self.lbl_data_title = QtWidgets.QLabel("Debug data")
 
         self.lbl_crop = QtWidgets.QLabel()
         self.lbl_lines = QtWidgets.QLabel()
+        self.lbl_profile = QtWidgets.QLabel()
         self.txt_data = QtWidgets.QPlainTextEdit(readOnly=True)
         self.txt_data.setMaximumBlockCount(10000)
         self.lbl_crop.setFrameStyle(QtWidgets.QFrame.Box | QtWidgets.QFrame.Plain)
@@ -837,6 +839,9 @@ class DebugWindow(QtWidgets.QDialog):
         self.lbl_lines.setFrameStyle(QtWidgets.QFrame.Box | QtWidgets.QFrame.Plain)
         self.lbl_lines.setAlignment(QtCore.Qt.AlignCenter)
         self.lbl_lines.setMinimumSize(240, 180)
+        self.lbl_profile.setFrameStyle(QtWidgets.QFrame.Box | QtWidgets.QFrame.Plain)
+        self.lbl_profile.setAlignment(QtCore.Qt.AlignCenter)
+        self.lbl_profile.setMinimumSize(240, 120)
 
         self.lbl_stats = QtWidgets.QLabel("")
 
@@ -844,9 +849,11 @@ class DebugWindow(QtWidgets.QDialog):
         layout.addWidget(self.lbl_lines_title, 0, 1)
         layout.addWidget(self.lbl_crop, 1, 0)
         layout.addWidget(self.lbl_lines, 1, 1)
-        layout.addWidget(self.lbl_stats, 2, 0, 1, 2)
-        layout.addWidget(self.lbl_data_title, 3, 0, 1, 2)
-        layout.addWidget(self.txt_data, 4, 0, 1, 2)
+        layout.addWidget(self.lbl_profile_title, 2, 0, 1, 2)
+        layout.addWidget(self.lbl_profile, 3, 0, 1, 2)
+        layout.addWidget(self.lbl_stats, 4, 0, 1, 2)
+        layout.addWidget(self.lbl_data_title, 5, 0, 1, 2)
+        layout.addWidget(self.txt_data, 6, 0, 1, 2)
 
     def update_views(
         self,
@@ -855,6 +862,7 @@ class DebugWindow(QtWidgets.QDialog):
         peaks: np.ndarray,
         valid: np.ndarray,
         meta: dict,
+        profile: Optional[Tuple[np.ndarray, np.ndarray]] = None,
     ) -> None:
         if roi_gray is not None and roi_gray.size > 0:
             self._crop_pixmap = self._gray_to_pixmap(roi_gray)
@@ -864,6 +872,7 @@ class DebugWindow(QtWidgets.QDialog):
             self._lines_pixmap = self._gray_to_pixmap(overlay)
         else:
             self._lines_pixmap = None
+        self._profile_pixmap = self._plot_profile(profile)
         self._apply_scaled()
 
         if meta:
@@ -893,6 +902,10 @@ class DebugWindow(QtWidgets.QDialog):
             self.lbl_lines.setPixmap(self._scaled(self._lines_pixmap, self.lbl_lines))
         else:
             self.lbl_lines.clear()
+        if self._profile_pixmap is not None:
+            self.lbl_profile.setPixmap(self._scaled(self._profile_pixmap, self.lbl_profile))
+        else:
+            self.lbl_profile.clear()
 
     def _update_data_table(
         self, peaks: np.ndarray, valid: np.ndarray, meta: Optional[dict]
@@ -929,6 +942,14 @@ class DebugWindow(QtWidgets.QDialog):
                     f"{i:03d} angle={angle:6.1f} deg peak_r={peak_r:7.2f} "
                     f"max={max_val:7.1f} valid={val}"
                 )
+
+        if meta.get("profile_x_mm") is not None:
+            x0, x1 = meta["profile_x_mm"]
+            lines.append(f"profile_x_mm=({x0:.3f}, {x1:.3f})")
+        if meta.get("dark_offset_px") is not None:
+            lines.append(f"dark_offset_px={meta['dark_offset_px']:.3f}")
+        if meta.get("score_px") is not None:
+            lines.append(f"score_px={meta['score_px']:.3f}")
 
         self.txt_data.setPlainText("\n".join(lines) if lines else "No data.")
 
@@ -967,6 +988,82 @@ class DebugWindow(QtWidgets.QDialog):
         h, w = arr.shape
         qimg = QtGui.QImage(arr.data, w, h, w, QtGui.QImage.Format_Grayscale8)
         return QtGui.QPixmap.fromImage(qimg.copy())
+
+    @staticmethod
+    def _plot_profile(
+        profile: Optional[Tuple[np.ndarray, np.ndarray]]
+    ) -> Optional[QtGui.QPixmap]:
+        if profile is None:
+            return None
+        xs, ys = profile
+        xs = np.asarray(xs, dtype=np.float32).ravel()
+        vals = np.asarray(ys, dtype=np.float32).ravel()
+        if vals.size < 2 or xs.size != vals.size:
+            return None
+        vals = np.nan_to_num(vals, nan=0.0, posinf=0.0, neginf=0.0)
+        xmin = float(xs[0])
+        xmax = float(xs[-1])
+        vmin = float(np.min(vals))
+        vmax = float(np.max(vals))
+
+        w = max(360, int(vals.size))
+        h = 180
+        left = 40
+        right = 10
+        top = 10
+        bottom = 25
+        plot_w = max(1, w - left - right)
+        plot_h = max(1, h - top - bottom)
+
+        img = np.full((h, w, 3), 255, dtype=np.uint8)
+        # Axes
+        DebugWindow._draw_line(img, left, top, left, top + plot_h, (0, 0, 0))
+        DebugWindow._draw_line(
+            img, left, top + plot_h, left + plot_w, top + plot_h, (0, 0, 0)
+        )
+        if xmax > xmin:
+            x0 = int(round(left + plot_w * (-xmin / (xmax - xmin))))
+            if left <= x0 <= left + plot_w:
+                DebugWindow._draw_line(img, x0, top, x0, top + plot_h, (220, 220, 220))
+
+        if vmax <= vmin:
+            y = int(top + plot_h / 2)
+            DebugWindow._draw_line(img, left, y, left + plot_w, y, (0, 0, 0))
+            return DebugWindow._gray_to_pixmap(img)
+
+        xs_plot = np.linspace(0, vals.size - 1, plot_w)
+        vals_plot = np.interp(xs_plot, np.arange(vals.size), vals)
+        y_plot = (plot_h - 1) - (vals_plot - vmin) / (vmax - vmin) * (plot_h - 1)
+        for i in range(1, plot_w):
+            DebugWindow._draw_line(
+                img,
+                left + i - 1,
+                top + y_plot[i - 1],
+                left + i,
+                top + y_plot[i],
+                (0, 0, 0),
+            )
+        return DebugWindow._gray_to_pixmap(img)
+
+    @staticmethod
+    def _draw_line(
+        img: np.ndarray,
+        x0: float,
+        y0: float,
+        x1: float,
+        y1: float,
+        color: Tuple[int, int, int],
+    ) -> None:
+        h, w = img.shape[:2]
+        dx = x1 - x0
+        dy = y1 - y0
+        steps = int(max(abs(dx), abs(dy))) + 1
+        if steps <= 0:
+            return
+        xs = np.linspace(x0, x1, steps).astype(np.int32)
+        ys = np.linspace(y0, y1, steps).astype(np.int32)
+        mask = (xs >= 0) & (xs < w) & (ys >= 0) & (ys < h)
+        img[ys[mask], xs[mask]] = color
 
     @staticmethod
     def _plot_peaks(peaks: np.ndarray, valid: np.ndarray) -> QtGui.QPixmap:
@@ -1041,6 +1138,11 @@ class DonutOptimizationWindow(QtWidgets.QDialog):
         self.btn_pick_circle.clicked.connect(self._pick_donut_circle)
         self.btn_analyze = QtWidgets.QPushButton("Donut analysis")
         self.btn_analyze.clicked.connect(self._run_donut_analysis)
+        self.dsb_px_um = QtWidgets.QDoubleSpinBox()
+        self.dsb_px_um.setRange(0.01, 1000.0)
+        self.dsb_px_um.setDecimals(4)
+        self.dsb_px_um.setValue(1.0)
+        self.dsb_px_um.setSuffix(" um/px")
         self.btn_clear_manual = QtWidgets.QPushButton("Clear")
         self.btn_clear_manual.clicked.connect(self._clear_manual_target)
 
@@ -1048,8 +1150,10 @@ class DonutOptimizationWindow(QtWidgets.QDialog):
         manual_layout.addWidget(self.lbl_manual_radius, 1, 0, 1, 2)
         manual_layout.addWidget(self.btn_pick_center, 0, 2)
         manual_layout.addWidget(self.btn_pick_circle, 1, 2)
+        manual_layout.addWidget(QtWidgets.QLabel("Camera pixel size"), 2, 0)
+        manual_layout.addWidget(self.dsb_px_um, 2, 1)
         manual_layout.addWidget(self.btn_clear_manual, 0, 3, 2, 1)
-        manual_layout.addWidget(self.btn_analyze, 2, 0, 1, 4)
+        manual_layout.addWidget(self.btn_analyze, 3, 0, 1, 4)
         layout.addWidget(manual_group)
 
         scan_group = QtWidgets.QGroupBox("2) Scan Settings (mm)")
@@ -1256,15 +1360,22 @@ class DonutOptimizationWindow(QtWidgets.QDialog):
         overlay = self._draw_angle_lines(
             crop, center_in_crop, radius, base_angle, angles_count
         )
+        pixel_size_mm = float(self.dsb_px_um.value()) * 1e-3
+        profile_x_mm, profile_y = self._sample_line_profile(
+            gray, (float(cx), float(cy)), radius, base_angle, pixel_size_mm
+        )
         meta = {
             "center": (float(cx), float(cy)),
             "radius": float(radius),
             "r_min": 0.0,
             "r_max": float(radius),
+            "profile_x_mm": (float(profile_x_mm[0]), float(profile_x_mm[-1])),
         }
         if self._debug_window is None:
             self._debug_window = DebugWindow(self)
-        self._debug_window.update_views(crop, overlay, None, None, meta)
+        self._debug_window.update_views(
+            crop, overlay, None, None, meta, (profile_x_mm, profile_y)
+        )
         self._debug_window.show()
         self._debug_window.raise_()
         self._debug_window.activateWindow()
@@ -1298,6 +1409,28 @@ class DonutOptimizationWindow(QtWidgets.QDialog):
         return color
 
     @staticmethod
+    def _sample_line_profile(
+        img: np.ndarray,
+        center: Tuple[float, float],
+        radius: float,
+        angle: float,
+        pixel_size_mm: float,
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        if img is None or img.size == 0:
+            return np.zeros((0,), dtype=np.float32), np.zeros((0,), dtype=np.float32)
+        r = max(1.0, float(radius))
+        samples = int(max(50, round(2.0 * r)))
+        t = np.linspace(-r, r, samples, dtype=np.float32)
+        cx, cy = center
+        cos_t = math.cos(angle)
+        sin_t = math.sin(angle)
+        xs = cx + cos_t * t
+        ys = cy + sin_t * t
+        vals = OffsetScanWorker._bilinear_sample(img.astype(np.float32), xs, ys).ravel()
+        x_mm = t * float(pixel_size_mm)
+        return x_mm.astype(np.float32), vals
+
+    @staticmethod
     def _draw_line(
         img: np.ndarray,
         x0: float,
@@ -1321,40 +1454,11 @@ class DonutOptimizationWindow(QtWidgets.QDialog):
         if not self._camera.is_running():
             self._append_error("Camera must be running.")
             return
-        if self._manual_radius is None:
-            self._append_error("Please draw the donut circle (radius).")
+        if self._circle_center is None or self._manual_radius is None:
+            self._append_error("Please draw the donut circle.")
             return
-        # Choose a reference center for scoring (circle center preferred; dark-spot fallback).
-        ref_center = self._circle_center or self._manual_center
-        if ref_center is None:
-            self._append_error("Please pick a reference center (dark spot or circle center).")
-            return
-        roi = self._camera.get_roi()
-        if roi is None:
-            # ROI is optional: auto-derive a reasonable crop from the picked center+radius.
-            frame = self._camera.get_last_frame()
-            if frame is None:
-                self._append_error("No camera frame available (cannot auto-set ROI).")
-                return
-            img_h, img_w = frame.shape[:2]
-            cx_f, cy_f = ref_center
-            r = float(self._manual_radius)
-            margin = max(40.0, 0.6 * r)
-            half = int(round(min(max(r + margin, 80.0), 0.49 * min(img_w, img_h))))
-            cx_i = int(round(cx_f))
-            cy_i = int(round(cy_f))
-            x0 = max(0, cx_i - half)
-            y0 = max(0, cy_i - half)
-            x1 = min(img_w, cx_i + half)
-            y1 = min(img_h, cy_i + half)
-            if x1 <= x0 or y1 <= y0:
-                self._append_error("Auto ROI failed (invalid crop).")
-                return
-            roi = (int(x0), int(y0), int(x1 - x0), int(y1 - y0))
-        cx, cy = ref_center
-        x, y, w, h = roi
-        if not (x <= cx < x + w and y <= cy < y + h):
-            self._append_error("Manual center must be inside the ROI.")
+        if self._manual_center is None:
+            self._append_error("Please pick the dark spot center.")
             return
         if self._manual_radius <= 0:
             self._append_error("Manual circle radius must be > 0.")
@@ -1367,21 +1471,19 @@ class DonutOptimizationWindow(QtWidgets.QDialog):
             x_step_mm=float(self.dsb_x_step.value()),
             y_range_mm=float(self.dsb_y_range.value()),
             y_step_mm=float(self.dsb_y_step.value()),
-            refine_enabled=self.chk_refine.isChecked(),
-            refine_x_range_mm=float(self.dsb_ref_x_range.value()),
-            refine_x_step_mm=float(self.dsb_ref_x_step.value()),
-            refine_y_range_mm=float(self.dsb_ref_y_range.value()),
-            refine_y_step_mm=float(self.dsb_ref_y_step.value()),
             settle_ms=int(self.spin_settle.value()),
             slot=int(self.spin_slot.value()),
             debug_enabled=self.chk_debug.isChecked(),
             angles_count=int(self.spin_angles.value()),
-            manual_center=(float(cx), float(cy)),
-            manual_radius=float(self._manual_radius),
+            circle_center=(float(self._circle_center[0]), float(self._circle_center[1])),
+            circle_radius=float(self._manual_radius),
+            dark_hint=(float(self._manual_center[0]), float(self._manual_center[1])),
+            pixel_size_mm=float(self.dsb_px_um.value()) * 1e-3,
+            threshold_px=OffsetScanWorker._TARGET_DIST_PX,
         )
 
         self._thread = QtCore.QThread(self)
-        self._worker = OffsetScanWorker(self._vortex, self._slm, self._camera, roi, settings)
+        self._worker = OffsetScanWorker(self._vortex, self._slm, self._camera, settings)
         self._worker.moveToThread(self._thread)
         self._thread.started.connect(self._worker.run)
         self._worker.log.connect(self._append_log)
@@ -1437,8 +1539,9 @@ class DonutOptimizationWindow(QtWidgets.QDialog):
         peaks: np.ndarray,
         valid: np.ndarray,
         meta: dict,
+        profile: object,
     ) -> None:
         if self._debug_window is None:
             self._debug_window = DebugWindow(self)
         if self.chk_debug.isChecked():
-            self._debug_window.update_views(roi_gray, polar, peaks, valid, meta)
+            self._debug_window.update_views(roi_gray, polar, peaks, valid, meta, profile)
