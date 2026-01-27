@@ -344,6 +344,16 @@ class CameraWindow(QtWidgets.QWidget):
         self._point_selecting = True
         self._append_log("Click to select the dark spot center.")
 
+    def set_selected_point(
+        self, point: Optional[Tuple[float, float]], emit: bool = False
+    ) -> None:
+        self._selected_point = (
+            (float(point[0]), float(point[1])) if point is not None else None
+        )
+        if emit and self._selected_point is not None:
+            self.point_selected.emit(self._selected_point)
+        self._refresh_last_frame()
+
     def begin_circle_selection(self, center: Optional[Tuple[float, float]] = None) -> None:
         if self._thread is None:
             self._append_error("Camera is not running.")

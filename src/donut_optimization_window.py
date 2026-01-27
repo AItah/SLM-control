@@ -40,6 +40,7 @@ class OffsetScanWorker(QtCore.QObject):
     progress = QtCore.Signal(int, int)
     finished = QtCore.Signal(float, float)
     failed = QtCore.Signal(str)
+    dark_center = QtCore.Signal(object)
     debug_data = QtCore.Signal(object, object, object, object, object, object)
     _ANGLES_FAST = 4
     _MAX_WORSE_STREAK = 2
@@ -214,6 +215,10 @@ class OffsetScanWorker(QtCore.QObject):
             t_min = float(t_px[idx_local])
             v_min = float(vals[idx_local])
         score = abs(t_min)
+        cos_t = math.cos(self._base_angle)
+        sin_t = math.sin(self._base_angle)
+        dark_center = (float(cx + cos_t * t_min), float(cy + sin_t * t_min))
+        self.dark_center.emit(dark_center)
 
         if self._settings.debug_enabled:
             crop = self._crop_circle_mask(gray, (cx, cy), radius)
@@ -236,6 +241,7 @@ class OffsetScanWorker(QtCore.QObject):
                 "dark_offset_px": float(t_min),
                 "dark_value": float(v_min),
                 "score_px": float(score),
+                "dark_center": dark_center,
             }
             self.debug_data.emit(crop, overlay, None, None, meta, (profile_x_mm, vals))
 
@@ -1491,6 +1497,7 @@ class DonutOptimizationWindow(QtWidgets.QDialog):
         self._worker.failed.connect(self._on_failed)
         self._worker.finished.connect(self._on_finished)
         self._worker.debug_data.connect(self._on_debug_data)
+        self._worker.dark_center.connect(self._on_dark_center_update)
         self._thread.start()
         self.btn_start.setEnabled(False)
         self.btn_stop.setEnabled(True)
@@ -1545,3 +1552,8 @@ class DonutOptimizationWindow(QtWidgets.QDialog):
             self._debug_window = DebugWindow(self)
         if self.chk_debug.isChecked():
             self._debug_window.update_views(roi_gray, polar, peaks, valid, meta, profile)
+
+    def _on_dark_center_update(self, point: Tuple[float, float]) -> None:
+        self._manual_center = (float(point[0]), float(point[1]))
+        self._update_manual_labels()
+        self._camera.set_selected_point(self._manual_center, emit=False)
