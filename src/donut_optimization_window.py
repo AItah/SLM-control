@@ -47,6 +47,7 @@ class OffsetScanWorker(QtCore.QObject):
     _TARGET_DIST_PX = 2.0
     _MIN_STEP_FRACTION = 0.1
     _DARK_SEARCH_FRAC = 0.6
+    _DARK_ROI_PX = 75
 
     def __init__(
         self,
@@ -61,11 +62,10 @@ class OffsetScanWorker(QtCore.QObject):
         self._camera = camera
         self._settings = settings
         self._running = True
-        cx, cy = self._settings.circle_center
-        hx, hy = self._settings.dark_hint
-        dx = float(hx) - float(cx)
-        dy = float(hy) - float(cy)
-        self._base_angle = math.atan2(dy, dx) if (dx != 0.0 or dy != 0.0) else 0.0
+        self._current_dark = (
+            float(self._settings.dark_hint[0]),
+            float(self._settings.dark_hint[1]),
+        )
 
     @QtCore.Slot()
     def run(self) -> None:
@@ -201,23 +201,56 @@ class OffsetScanWorker(QtCore.QObject):
         cx, cy = self._settings.circle_center
         radius = float(self._settings.circle_radius)
 
-        t_px, vals = self._sample_line_profile_px(gray, (cx, cy), radius, self._base_angle)
+        hx, hy = self._current_dark
+        dark_center, dark_diam = self._find_dark_spot_cv2(gray, (hx, hy))
+        if dark_center is None:
+            dx = float(hx) - float(cx)
+            dy = float(hy) - float(cy)
+            base_angle = math.atan2(dy, dx) if (dx != 0.0 or dy != 0.0) else 0.0
+        else:
+            dx = float(dark_center[0]) - float(cx)
+            dy = float(dark_center[1]) - float(cy)
+            base_angle = math.atan2(dy, dx) if (dx != 0.0 or dy != 0.0) else 0.0
+
+        t_px, vals = self._sample_line_profile_px(gray, (cx, cy), radius, base_angle)
         if t_px.size == 0:
             raise RuntimeError("Failed to compute cross-section.")
         search_win = float(self._DARK_SEARCH_FRAC) * radius
         mask = np.abs(t_px) <= search_win
         if np.any(mask):
             idx_local = int(np.argmin(vals[mask]))
-            t_min = float(t_px[mask][idx_local])
-            v_min = float(vals[mask][idx_local])
+            idx_full = int(np.where(mask)[0][idx_local])
+            t_min = float(t_px[idx_full])
+            v_min = float(vals[idx_full])
         else:
-            idx_local = int(np.argmin(vals))
-            t_min = float(t_px[idx_local])
-            v_min = float(vals[idx_local])
-        score = abs(t_min)
-        cos_t = math.cos(self._base_angle)
-        sin_t = math.sin(self._base_angle)
-        dark_center = (float(cx + cos_t * t_min), float(cy + sin_t * t_min))
+            idx_full = int(np.argmin(vals))
+            t_min = float(t_px[idx_full])
+            v_min = float(vals[idx_full])
+
+        if dark_center is None:
+            dark_width = self._estimate_dark_width(t_px, vals, idx_full, radius)
+            span = max(6.0, float(dark_width))
+            t1, v1 = self._sample_line_profile_span(gray, (hx, hy), span, base_angle)
+            t2, v2 = self._sample_line_profile_span(
+                gray, (hx, hy), span, base_angle + math.pi / 2.0
+            )
+            t1_min = float(t1[int(np.argmin(v1))]) if t1.size > 0 else 0.0
+            t2_min = float(t2[int(np.argmin(v2))]) if t2.size > 0 else 0.0
+            cos_t = math.cos(base_angle)
+            sin_t = math.sin(base_angle)
+            cos_o = math.cos(base_angle + math.pi / 2.0)
+            sin_o = math.sin(base_angle + math.pi / 2.0)
+            dark_center = (
+                float(hx + cos_t * t1_min + cos_o * t2_min),
+                float(hy + sin_t * t1_min + sin_o * t2_min),
+            )
+            dark_diam = float(dark_width)
+        else:
+            dark_width = float(dark_diam) if dark_diam is not None else 0.0
+        score = float(
+            math.hypot(dark_center[0] - float(cx), dark_center[1] - float(cy))
+        )
+        self._current_dark = dark_center
         self.dark_center.emit(dark_center)
 
         if self._settings.debug_enabled:
@@ -230,7 +263,7 @@ class OffsetScanWorker(QtCore.QObject):
                 crop,
                 center_in_crop,
                 radius,
-                self._base_angle,
+                base_angle,
                 max(1, int(self._settings.angles_count)),
             )
             profile_x_mm = t_px * float(self._settings.pixel_size_mm)
@@ -242,6 +275,8 @@ class OffsetScanWorker(QtCore.QObject):
                 "dark_value": float(v_min),
                 "score_px": float(score),
                 "dark_center": dark_center,
+                "dark_width_px": float(dark_width),
+                "dark_diam_px": float(dark_diam) if dark_diam is not None else None,
             }
             self.debug_data.emit(crop, overlay, None, None, meta, (profile_x_mm, vals))
 
@@ -497,6 +532,110 @@ class OffsetScanWorker(QtCore.QObject):
         ys = cy + sin_t * t
         vals = OffsetScanWorker._bilinear_sample(img.astype(np.float32), xs, ys).ravel()
         return t.astype(np.float32), vals
+
+    @staticmethod
+    def _sample_line_profile_span(
+        img: np.ndarray,
+        center: Tuple[float, float],
+        span_px: float,
+        angle: float,
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        if img is None or img.size == 0:
+            return np.zeros((0,), dtype=np.float32), np.zeros((0,), dtype=np.float32)
+        half = max(1.0, float(span_px) / 2.0)
+        samples = int(max(30, round(2.0 * half)))
+        t = np.linspace(-half, half, samples, dtype=np.float32)
+        cx, cy = center
+        cos_t = math.cos(angle)
+        sin_t = math.sin(angle)
+        xs = cx + cos_t * t
+        ys = cy + sin_t * t
+        vals = OffsetScanWorker._bilinear_sample(img.astype(np.float32), xs, ys).ravel()
+        return t.astype(np.float32), vals
+
+    @staticmethod
+    def _estimate_dark_width(
+        t_px: np.ndarray,
+        vals: np.ndarray,
+        idx_min: int,
+        radius: float,
+    ) -> float:
+        if t_px.size < 5 or vals.size != t_px.size:
+            return max(10.0, 0.2 * float(radius))
+        min_v = float(vals[idx_min])
+        baseline = float(np.median(vals))
+        if baseline <= min_v:
+            return max(10.0, 0.2 * float(radius))
+        thr = min_v + 0.3 * (baseline - min_v)
+        mask = vals <= thr
+        if not np.any(mask):
+            return max(10.0, 0.2 * float(radius))
+        left = idx_min
+        right = idx_min
+        while left > 0 and mask[left]:
+            left -= 1
+        while right < len(mask) - 1 and mask[right]:
+            right += 1
+        if not mask[left]:
+            left = min(len(mask) - 1, left + 1)
+        if not mask[right]:
+            right = max(0, right - 1)
+        width = float(abs(t_px[right] - t_px[left]))
+        if width <= 1.0:
+            width = max(10.0, 0.2 * float(radius))
+        return width
+
+    def _find_dark_spot_cv2(
+        self, img: np.ndarray, click: Tuple[float, float]
+    ) -> Tuple[Optional[Tuple[float, float]], Optional[float]]:
+        if cv2 is None:
+            return None, None
+        if img is None or img.size == 0:
+            return None, None
+        gray = self._normalize_to_u8(img)
+        h, w = gray.shape[:2]
+        cx = int(round(float(click[0])))
+        cy = int(round(float(click[1])))
+        roi_size = int(self._DARK_ROI_PX)
+        y1 = max(0, cy - roi_size)
+        y2 = min(h, cy + roi_size)
+        x1 = max(0, cx - roi_size)
+        x2 = min(w, cx + roi_size)
+        if x2 <= x1 or y2 <= y1:
+            return None, None
+        roi = gray[y1:y2, x1:x2]
+        min_dim = min(roi.shape[0], roi.shape[1])
+        if min_dim < 3:
+            return None, None
+        if min_dim % 2 == 0:
+            min_dim -= 1
+        block = max(3, min(51, min_dim))
+        thresh = cv2.adaptiveThreshold(
+            roi,
+            255,
+            cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+            cv2.THRESH_BINARY_INV,
+            block,
+            2,
+        )
+        contours, _ = cv2.findContours(
+            thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+        )
+        if not contours:
+            return None, None
+        contour = max(contours, key=cv2.contourArea)
+        area = float(cv2.contourArea(contour))
+        if area <= 0:
+            return None, None
+        m = cv2.moments(contour)
+        if m["m00"] == 0:
+            return None, None
+        local_cx = float(m["m10"] / m["m00"])
+        local_cy = float(m["m01"] / m["m00"])
+        global_cx = float(x1 + local_cx)
+        global_cy = float(y1 + local_cy)
+        diameter = float(math.sqrt(4.0 * area / math.pi))
+        return (global_cx, global_cy), diameter
 
     def _score_warp_polar(
         self, roi_gray: np.ndarray, center: Tuple[float, float]
@@ -954,6 +1093,10 @@ class DebugWindow(QtWidgets.QDialog):
             lines.append(f"profile_x_mm=({x0:.3f}, {x1:.3f})")
         if meta.get("dark_offset_px") is not None:
             lines.append(f"dark_offset_px={meta['dark_offset_px']:.3f}")
+        if meta.get("dark_width_px") is not None:
+            lines.append(f"dark_width_px={meta['dark_width_px']:.3f}")
+        if meta.get("dark_diam_px") is not None:
+            lines.append(f"dark_diam_px={meta['dark_diam_px']:.3f}")
         if meta.get("score_px") is not None:
             lines.append(f"score_px={meta['score_px']:.3f}")
 
