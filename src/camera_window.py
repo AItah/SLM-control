@@ -167,6 +167,17 @@ class CameraWindow(QtWidgets.QWidget):
         btns.addStretch(1)
         layout.addLayout(btns)
 
+        filt = QtWidgets.QHBoxLayout()
+        self.chk_filter = QtWidgets.QCheckBox("Zero below threshold")
+        self.chk_filter.setChecked(False)
+        self.spin_filter = QtWidgets.QSpinBox()
+        self.spin_filter.setRange(0, 255)
+        self.spin_filter.setValue(10)
+        filt.addWidget(self.chk_filter)
+        filt.addWidget(self.spin_filter)
+        filt.addStretch(1)
+        layout.addLayout(filt)
+
         self.lbl_view = QtWidgets.QLabel()
         self.lbl_view.setAlignment(QtCore.Qt.AlignCenter)
         self.lbl_view.setMinimumSize(640, 480)
@@ -610,13 +621,14 @@ class CameraWindow(QtWidgets.QWidget):
             return int(w), int(h)
 
     def _render_frame(self, frame: np.ndarray, fmt: str) -> None:
-        if frame.ndim == 2:
-            qimg = _gray_to_qimage(frame)
+        frame_disp = self._apply_view_filter(frame, fmt)
+        if frame_disp.ndim == 2:
+            qimg = _gray_to_qimage(frame_disp)
         else:
             if fmt == "rgb8":
-                qimg = _rgb_to_qimage(frame)
+                qimg = _rgb_to_qimage(frame_disp)
             else:
-                qimg = _bgr_to_qimage(frame)
+                qimg = _bgr_to_qimage(frame_disp)
         pix = QtGui.QPixmap.fromImage(qimg)
         pix = pix.scaled(
             self.lbl_view.size(),
@@ -626,6 +638,28 @@ class CameraWindow(QtWidgets.QWidget):
         pix = self._draw_overlay_on_pixmap(pix, frame.shape[1], frame.shape[0])
         self.lbl_view.setPixmap(pix)
         self._update_roi_overlay()
+
+    def _apply_view_filter(self, frame: np.ndarray, fmt: str) -> np.ndarray:
+        if not self.chk_filter.isChecked():
+            return frame
+        thr = int(self.spin_filter.value())
+        if frame.ndim == 2:
+            out = frame.copy()
+            out[out < thr] = 0
+            return out
+        out = frame.copy()
+        if fmt == "rgb8":
+            r = out[:, :, 0].astype(np.float32)
+            g = out[:, :, 1].astype(np.float32)
+            b = out[:, :, 2].astype(np.float32)
+        else:
+            b = out[:, :, 0].astype(np.float32)
+            g = out[:, :, 1].astype(np.float32)
+            r = out[:, :, 2].astype(np.float32)
+        gray = 0.299 * r + 0.587 * g + 0.114 * b
+        mask = gray < float(thr)
+        out[mask] = 0
+        return out
 
     def _refresh_last_frame(self) -> None:
         with self._frame_lock:
