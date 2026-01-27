@@ -160,8 +160,10 @@ def make_shift_phase(coords: Coordinates, fcp_x: float, fcp_y: float) -> np.ndar
     return 2 * np.pi * (fcp_x * coords.xi + fcp_y * coords.yi)
 
 
-def make_circular_aperture(coords: Coordinates, radius_m: float) -> np.ndarray:
-    r = np.hypot(coords.X, coords.Y)
+def make_circular_aperture(
+    coords: Coordinates, radius_m: float, sft_x_m: float = 0.0, sft_y_m: float = 0.0
+) -> np.ndarray:
+    r = np.hypot(coords.X - sft_x_m, coords.Y - sft_y_m)
     return (r <= radius_m).astype(np.float64)
 
 
@@ -265,7 +267,9 @@ def generate_mask(
 
     vortex = make_vortex_phase(coords, ell, sft_x=sft_x_m, sft_y=sft_y_m)
     if aperture_radius_m is not None:
-        vortex = vortex * make_circular_aperture(coords, aperture_radius_m)
+        vortex = vortex * make_circular_aperture(
+            coords, aperture_radius_m, sft_x_m=sft_x_m, sft_y_m=sft_y_m
+        )
 
     steer = None
     if use_forked:
