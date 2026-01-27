@@ -110,6 +110,8 @@ class CameraWindow(QtWidgets.QWidget):
         self._point_selecting = False
         self._circle_selecting = False
         self._circle_dragging = False
+        self._circle_edit_mode: Optional[str] = None
+        self._circle_drag_offset: Optional[Tuple[float, float]] = None
         self._selected_point: Optional[Tuple[float, float]] = None
         self._selected_circle_center: Optional[Tuple[float, float]] = None
         self._selected_circle_radius: Optional[float] = None
@@ -367,6 +369,78 @@ class CameraWindow(QtWidgets.QWidget):
 
     def eventFilter(self, obj, event) -> bool:
         if obj is self.lbl_view:
+            if (
+                not self._roi_selecting
+                and not self._point_selecting
+                and not self._circle_selecting
+                and self._selected_circle_center is not None
+                and self._selected_circle_radius is not None
+            ):
+                if event.type() == QtCore.QEvent.MouseButtonPress:
+                    pos = self._label_pos_to_image(event.position())
+                    if pos is None:
+                        return False
+                    cx, cy = self._selected_circle_center
+                    dx = float(pos[0]) - float(cx)
+                    dy = float(pos[1]) - float(cy)
+                    dist = float((dx * dx + dy * dy) ** 0.5)
+                    r = float(self._selected_circle_radius)
+                    move_thresh = max(8.0, 0.03 * r)
+                    resize_thresh = max(6.0, 0.02 * r)
+                    if dist <= move_thresh:
+                        self._circle_dragging = True
+                        self._circle_edit_mode = "move"
+                        self._circle_drag_offset = (dx, dy)
+                        return True
+                    if abs(dist - r) <= resize_thresh:
+                        self._circle_dragging = True
+                        self._circle_edit_mode = "resize"
+                        self._circle_drag_offset = None
+                        return True
+                if (
+                    event.type() == QtCore.QEvent.MouseMove
+                    and self._circle_dragging
+                    and self._circle_edit_mode is not None
+                ):
+                    pos = self._label_pos_to_image(event.position())
+                    if pos is None:
+                        return True
+                    if self._circle_edit_mode == "move":
+                        if self._circle_drag_offset is None:
+                            self._circle_drag_offset = (0.0, 0.0)
+                        ox, oy = self._circle_drag_offset
+                        self._selected_circle_center = (
+                            float(pos[0]) - float(ox),
+                            float(pos[1]) - float(oy),
+                        )
+                    elif self._circle_edit_mode == "resize":
+                        cx, cy = self._selected_circle_center
+                        dx = float(pos[0]) - float(cx)
+                        dy = float(pos[1]) - float(cy)
+                        self._selected_circle_radius = float((dx * dx + dy * dy) ** 0.5)
+                    self._refresh_last_frame()
+                    return True
+                if (
+                    event.type() == QtCore.QEvent.MouseButtonRelease
+                    and self._circle_dragging
+                    and self._circle_edit_mode is not None
+                ):
+                    self._circle_dragging = False
+                    self._circle_edit_mode = None
+                    self._circle_drag_offset = None
+                    if (
+                        self._selected_circle_center is not None
+                        and self._selected_circle_radius is not None
+                        and self._selected_circle_radius >= 2.0
+                    ):
+                        payload = (
+                            float(self._selected_circle_center[0]),
+                            float(self._selected_circle_center[1]),
+                            float(self._selected_circle_radius),
+                        )
+                        self.circle_selected.emit(payload)
+                    self._refresh_last_frame()
+                    return True
             if self._roi_selecting:
                 if event.type() == QtCore.QEvent.MouseButtonPress:
                     self._roi_start = event.position().toPoint()
@@ -645,5 +719,7 @@ class CameraWindow(QtWidgets.QWidget):
         self._point_selecting = False
         self._circle_selecting = False
         self._circle_dragging = False
+        self._circle_edit_mode = None
+        self._circle_drag_offset = None
         if self._roi_band is not None:
             self._roi_band.hide()

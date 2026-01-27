@@ -711,6 +711,27 @@ class OffsetScanWorker(QtCore.QObject):
         if img.size == 0:
             return img
         h, w = img.shape[:2]
+        x0c, y0c, x1c, y1c = OffsetScanWorker._circle_crop_bounds(
+            (h, w), center, radius
+        )
+        if x1c <= x0c or y1c <= y0c:
+            return np.zeros((0, 0), dtype=img.dtype)
+        crop = img[y0c:y1c, x0c:x1c].copy()
+        yy, xx = np.indices(crop.shape[:2])
+        cx, cy = center
+        dx = (x0c + xx) - cx
+        dy = (y0c + yy) - cy
+        r = max(1.0, float(radius))
+        mask = (dx * dx + dy * dy) <= (r * r)
+        masked = np.zeros_like(crop)
+        masked[mask] = crop[mask]
+        return masked
+
+    @staticmethod
+    def _circle_crop_bounds(
+        shape: Tuple[int, int], center: Tuple[float, float], radius: float
+    ) -> Tuple[int, int, int, int]:
+        h, w = shape
         cx, cy = center
         r = max(1.0, float(radius))
         x0 = int(math.floor(cx - r))
@@ -721,16 +742,7 @@ class OffsetScanWorker(QtCore.QObject):
         y0c = max(0, y0)
         x1c = min(w, x1)
         y1c = min(h, y1)
-        if x1c <= x0c or y1c <= y0c:
-            return np.zeros((0, 0), dtype=img.dtype)
-        crop = img[y0c:y1c, x0c:x1c].copy()
-        yy, xx = np.indices(crop.shape[:2])
-        dx = (x0c + xx) - cx
-        dy = (y0c + yy) - cy
-        mask = (dx * dx + dy * dy) <= (r * r)
-        masked = np.zeros_like(crop)
-        masked[mask] = crop[mask]
-        return masked
+        return x0c, y0c, x1c, y1c
 
     def _draw_manual_overlay(
         self,
@@ -807,31 +819,39 @@ class DebugWindow(QtWidgets.QDialog):
         self.resize(900, 600)
 
         self._crop_pixmap: Optional[QtGui.QPixmap] = None
+        self._lines_pixmap: Optional[QtGui.QPixmap] = None
 
         layout = QtWidgets.QGridLayout(self)
 
         self.lbl_crop_title = QtWidgets.QLabel("Circle crop (masked)")
+        self.lbl_lines_title = QtWidgets.QLabel("Angle lines")
         self.lbl_data_title = QtWidgets.QLabel("Debug data")
 
         self.lbl_crop = QtWidgets.QLabel()
+        self.lbl_lines = QtWidgets.QLabel()
         self.txt_data = QtWidgets.QPlainTextEdit(readOnly=True)
         self.txt_data.setMaximumBlockCount(10000)
         self.lbl_crop.setFrameStyle(QtWidgets.QFrame.Box | QtWidgets.QFrame.Plain)
         self.lbl_crop.setAlignment(QtCore.Qt.AlignCenter)
         self.lbl_crop.setMinimumSize(240, 180)
+        self.lbl_lines.setFrameStyle(QtWidgets.QFrame.Box | QtWidgets.QFrame.Plain)
+        self.lbl_lines.setAlignment(QtCore.Qt.AlignCenter)
+        self.lbl_lines.setMinimumSize(240, 180)
 
         self.lbl_stats = QtWidgets.QLabel("")
 
         layout.addWidget(self.lbl_crop_title, 0, 0)
+        layout.addWidget(self.lbl_lines_title, 0, 1)
         layout.addWidget(self.lbl_crop, 1, 0)
-        layout.addWidget(self.lbl_stats, 2, 0)
-        layout.addWidget(self.lbl_data_title, 3, 0)
-        layout.addWidget(self.txt_data, 4, 0)
+        layout.addWidget(self.lbl_lines, 1, 1)
+        layout.addWidget(self.lbl_stats, 2, 0, 1, 2)
+        layout.addWidget(self.lbl_data_title, 3, 0, 1, 2)
+        layout.addWidget(self.txt_data, 4, 0, 1, 2)
 
     def update_views(
         self,
         roi_gray: np.ndarray,
-        polar: np.ndarray,
+        overlay: np.ndarray,
         peaks: np.ndarray,
         valid: np.ndarray,
         meta: dict,
@@ -840,6 +860,10 @@ class DebugWindow(QtWidgets.QDialog):
             self._crop_pixmap = self._gray_to_pixmap(roi_gray)
         else:
             self._crop_pixmap = None
+        if overlay is not None and overlay.size > 0:
+            self._lines_pixmap = self._gray_to_pixmap(overlay)
+        else:
+            self._lines_pixmap = None
         self._apply_scaled()
 
         if meta:
@@ -865,6 +889,10 @@ class DebugWindow(QtWidgets.QDialog):
             self.lbl_crop.setPixmap(self._scaled(self._crop_pixmap, self.lbl_crop))
         else:
             self.lbl_crop.clear()
+        if self._lines_pixmap is not None:
+            self.lbl_lines.setPixmap(self._scaled(self._lines_pixmap, self.lbl_lines))
+        else:
+            self.lbl_lines.clear()
 
     def _update_data_table(
         self, peaks: np.ndarray, valid: np.ndarray, meta: Optional[dict]
@@ -1198,6 +1226,14 @@ class DonutOptimizationWindow(QtWidgets.QDialog):
         if not self._camera.is_running():
             self._append_error("Camera must be running.")
             return
+        if self._manual_center is None:
+            QtWidgets.QMessageBox.information(
+                self,
+                "Select dark spot",
+                "Please click the dark spot center in the camera view, then run Donut analysis again.",
+            )
+            self._camera.begin_point_selection()
+            return
         if self._circle_center is None or self._manual_radius is None:
             self._append_error("Please draw the donut circle.")
             return
@@ -1209,6 +1245,17 @@ class DonutOptimizationWindow(QtWidgets.QDialog):
         cx, cy = self._circle_center
         radius = float(self._manual_radius)
         crop = OffsetScanWorker._crop_circle_mask(gray, (cx, cy), radius)
+        x0c, y0c, _, _ = OffsetScanWorker._circle_crop_bounds(
+            gray.shape[:2], (cx, cy), radius
+        )
+        center_in_crop = (float(cx - x0c), float(cy - y0c))
+        dx = float(self._manual_center[0]) - float(cx)
+        dy = float(self._manual_center[1]) - float(cy)
+        base_angle = math.atan2(dy, dx) if (dx != 0.0 or dy != 0.0) else 0.0
+        angles_count = max(1, int(self.spin_angles.value()))
+        overlay = self._draw_angle_lines(
+            crop, center_in_crop, radius, base_angle, angles_count
+        )
         meta = {
             "center": (float(cx), float(cy)),
             "radius": float(radius),
@@ -1217,11 +1264,58 @@ class DonutOptimizationWindow(QtWidgets.QDialog):
         }
         if self._debug_window is None:
             self._debug_window = DebugWindow(self)
-        self._debug_window.update_views(crop, None, None, None, meta)
+        self._debug_window.update_views(crop, overlay, None, None, meta)
         self._debug_window.show()
         self._debug_window.raise_()
         self._debug_window.activateWindow()
         self._append_log("Donut analysis: plotted circle crop.")
+
+    @staticmethod
+    def _draw_angle_lines(
+        crop: np.ndarray,
+        center: Tuple[float, float],
+        radius: float,
+        base_angle: float,
+        angles_count: int,
+    ) -> np.ndarray:
+        if crop is None or crop.size == 0:
+            return crop
+        base = OffsetScanWorker._normalize_to_u8(crop)
+        color = np.repeat(base[:, :, None], 3, axis=2)
+        cx, cy = center
+        r = max(1.0, float(radius))
+        for i in range(angles_count):
+            # Use half-turn spacing so each diameter is unique (theta and theta+pi are the same line).
+            angle = base_angle + (math.pi * i / angles_count)
+            dx = math.cos(angle) * r
+            dy = math.sin(angle) * r
+            x0 = cx - dx
+            y0 = cy - dy
+            x1 = cx + dx
+            y1 = cy + dy
+            line_color = (0, 0, 255) if i == 0 else (0, 255, 255)
+            DonutOptimizationWindow._draw_line(color, x0, y0, x1, y1, line_color)
+        return color
+
+    @staticmethod
+    def _draw_line(
+        img: np.ndarray,
+        x0: float,
+        y0: float,
+        x1: float,
+        y1: float,
+        color: Tuple[int, int, int],
+    ) -> None:
+        h, w = img.shape[:2]
+        dx = x1 - x0
+        dy = y1 - y0
+        steps = int(max(abs(dx), abs(dy))) + 1
+        if steps <= 0:
+            return
+        xs = np.linspace(x0, x1, steps).astype(np.int32)
+        ys = np.linspace(y0, y1, steps).astype(np.int32)
+        mask = (xs >= 0) & (xs < w) & (ys >= 0) & (ys < h)
+        img[ys[mask], xs[mask]] = color
 
     def _start(self) -> None:
         if not self._camera.is_running():
