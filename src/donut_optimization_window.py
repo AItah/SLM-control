@@ -1697,39 +1697,6 @@ class DonutOptimizationWindow(QtWidgets.QDialog):
         scan_layout.addWidget(self.dsb_y_step, r, 3)
         r += 1
 
-        self.chk_refine = QtWidgets.QCheckBox("Enable refinement")
-        self.chk_refine.setChecked(True)
-        scan_layout.addWidget(self.chk_refine, r, 0, 1, 2)
-        r += 1
-
-        self.dsb_ref_x_range = QtWidgets.QDoubleSpinBox()
-        self.dsb_ref_x_range.setRange(0.0, 10.0)
-        self.dsb_ref_x_range.setDecimals(3)
-        self.dsb_ref_x_range.setValue(0.1)
-        self.dsb_ref_x_step = QtWidgets.QDoubleSpinBox()
-        self.dsb_ref_x_step.setRange(0.001, 10.0)
-        self.dsb_ref_x_step.setDecimals(3)
-        self.dsb_ref_x_step.setValue(0.01)
-        self.dsb_ref_y_range = QtWidgets.QDoubleSpinBox()
-        self.dsb_ref_y_range.setRange(0.0, 10.0)
-        self.dsb_ref_y_range.setDecimals(3)
-        self.dsb_ref_y_range.setValue(0.1)
-        self.dsb_ref_y_step = QtWidgets.QDoubleSpinBox()
-        self.dsb_ref_y_step.setRange(0.001, 10.0)
-        self.dsb_ref_y_step.setDecimals(3)
-        self.dsb_ref_y_step.setValue(0.01)
-
-        scan_layout.addWidget(QtWidgets.QLabel("Ref X range ±"), r, 0)
-        scan_layout.addWidget(self.dsb_ref_x_range, r, 1)
-        scan_layout.addWidget(QtWidgets.QLabel("Ref X step"), r, 2)
-        scan_layout.addWidget(self.dsb_ref_x_step, r, 3)
-        r += 1
-        scan_layout.addWidget(QtWidgets.QLabel("Ref Y range ±"), r, 0)
-        scan_layout.addWidget(self.dsb_ref_y_range, r, 1)
-        scan_layout.addWidget(QtWidgets.QLabel("Ref Y step"), r, 2)
-        scan_layout.addWidget(self.dsb_ref_y_step, r, 3)
-        r += 1
-
         self.spin_settle = QtWidgets.QSpinBox()
         self.spin_settle.setRange(2000, 10000)
         self.spin_settle.setValue(2000)
