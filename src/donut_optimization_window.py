@@ -363,10 +363,12 @@ class OffsetScanWorker(QtCore.QObject):
                 continue
 
             peaks_idx = np.argmax(polar, axis=1)
-        max_per_angle = polar.max(axis=1)
-        # Be robust to any NaNs/Infs that can appear from sampling/normalization.
-        if not np.isfinite(max_per_angle).all():
-            max_per_angle = np.nan_to_num(max_per_angle, nan=0.0, posinf=0.0, neginf=0.0)
+            max_per_angle = polar.max(axis=1)
+            # Be robust to any NaNs/Infs that can appear from sampling/normalization.
+            if not np.isfinite(max_per_angle).all():
+                max_per_angle = np.nan_to_num(
+                    max_per_angle, nan=0.0, posinf=0.0, neginf=0.0
+                )
             step = (r_max - r_min) / max(1, (polar.shape[1] - 1))
             peaks_r = r_min + peaks_idx * step
 
