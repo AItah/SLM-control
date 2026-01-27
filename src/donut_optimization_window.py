@@ -519,6 +519,56 @@ class OffsetScanWorker(QtCore.QObject):
         return out.astype(np.float32)
 
     @staticmethod
+    def _normalize_to_u8(img: np.ndarray) -> np.ndarray:
+        if img.dtype == np.uint8:
+            return img
+        img_min = float(np.min(img))
+        img_max = float(np.max(img))
+        if img_max <= img_min:
+            return np.zeros_like(img, dtype=np.uint8)
+        return ((img - img_min) / (img_max - img_min) * 255.0).astype(np.uint8)
+
+    @staticmethod
+    def _circle_crop_bounds(
+        shape: Tuple[int, int], center: Tuple[float, float], radius: float
+    ) -> Tuple[int, int, int, int]:
+        h, w = shape
+        cx, cy = center
+        r = max(1.0, float(radius))
+        x0 = int(math.floor(cx - r))
+        x1 = int(math.ceil(cx + r))
+        y0 = int(math.floor(cy - r))
+        y1 = int(math.ceil(cy + r))
+        x0c = max(0, x0)
+        y0c = max(0, y0)
+        x1c = min(w, x1)
+        y1c = min(h, y1)
+        return x0c, y0c, x1c, y1c
+
+    @staticmethod
+    def _crop_circle_mask(
+        img: np.ndarray, center: Tuple[float, float], radius: float
+    ) -> np.ndarray:
+        if img.size == 0:
+            return img
+        h, w = img.shape[:2]
+        x0c, y0c, x1c, y1c = OffsetScanWorker._circle_crop_bounds(
+            (h, w), center, radius
+        )
+        if x1c <= x0c or y1c <= y0c:
+            return np.zeros((0, 0), dtype=img.dtype)
+        crop = img[y0c:y1c, x0c:x1c].copy()
+        yy, xx = np.indices(crop.shape[:2])
+        cx, cy = center
+        dx = (x0c + xx) - cx
+        dy = (y0c + yy) - cy
+        r = max(1.0, float(radius))
+        mask = (dx * dx + dy * dy) <= (r * r)
+        masked = np.zeros_like(crop)
+        masked[mask] = crop[mask]
+        return masked
+
+    @staticmethod
     def _fit_radius_offset(angles: np.ndarray, radii: np.ndarray) -> tuple[float, float, float]:
         if angles.size < 3:
             return float(np.mean(radii)), 0.0, 0.0
