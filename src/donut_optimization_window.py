@@ -32,6 +32,9 @@ class ScanSettings:
     settle_ms: int
     slot: int
     debug_enabled: bool
+    angles_count: int
+    manual_center: Tuple[float, float]
+    manual_radius: float
 
 
 class OffsetScanWorker(QtCore.QObject):
@@ -39,7 +42,9 @@ class OffsetScanWorker(QtCore.QObject):
     progress = QtCore.Signal(int, int)
     finished = QtCore.Signal(float, float)
     failed = QtCore.Signal(str)
-    debug_data = QtCore.Signal(object, object, object, object)
+    debug_data = QtCore.Signal(object, object, object, object, object)
+    _ANGLES_FAST = 4
+    _MAX_WORSE_STREAK = 2
 
     def __init__(
         self,
@@ -110,26 +115,92 @@ class OffsetScanWorker(QtCore.QObject):
     def _scan_axis(self, axis: str, center: float, fixed: float, rng: float, step: float) -> float:
         if step <= 0:
             raise ValueError("Step must be > 0.")
-        offsets = self._build_offsets(center, rng, step)
-        total = len(offsets)
-        best_offset = center
-        best_score = float("inf")
+        if rng <= 0:
+            return center
 
-        for idx, offset in enumerate(offsets, start=1):
+        angles_full = max(self._ANGLES_FAST, int(self._settings.angles_count))
+        bound_lo = center - rng
+        bound_hi = center + rng
+        max_steps = int(math.floor(rng / step))
+        total_est = max(1, 3 + max_steps)
+        eval_count = 0
+
+        def eval_offset(offset: float, angles: int) -> float:
+            nonlocal eval_count
             if not self._running:
                 raise RuntimeError("Scan canceled.")
             if axis == "x":
                 off_x, off_y = offset, fixed
             else:
                 off_x, off_y = fixed, offset
-            score = self._evaluate_offset(off_x, off_y)
-            self.log.emit(f"{axis.upper()} {offset:.3f} mm -> score {score:.3f}")
+            score = self._evaluate_offset(off_x, off_y, angles)
+            eval_count += 1
+            self.progress.emit(min(eval_count, total_est), total_est)
+            self.log.emit(
+                f"{axis.upper()} {offset:.3f} mm -> score {score:.3f} (angles {angles})"
+            )
+            return score
+
+        best_offset = center
+        center_score = eval_offset(center, self._ANGLES_FAST)
+        best_score = center_score
+
+        candidates = []
+        for direction in (-1.0, 1.0):
+            cand = center + direction * step
+            if cand < bound_lo or cand > bound_hi:
+                continue
+            score = eval_offset(cand, self._ANGLES_FAST)
+            candidates.append((score, direction, cand))
             if score < best_score:
                 best_score = score
-                best_offset = offset
-            self.progress.emit(idx, total)
+                best_offset = cand
 
-        self.log.emit(f"Best {axis.upper()} = {best_offset:.3f} mm (score {best_score:.3f})")
+        if not candidates:
+            self.log.emit(
+                f"Best {axis.upper()} = {best_offset:.3f} mm (score {best_score:.3f})"
+            )
+            return best_offset
+
+        candidates.sort(key=lambda item: item[0])
+        if candidates[0][0] >= center_score:
+            self.log.emit(
+                f"No improvement along {axis.upper()} axis; keeping center."
+            )
+            self.log.emit(
+                f"Best {axis.upper()} = {best_offset:.3f} mm (score {best_score:.3f})"
+            )
+            return best_offset
+
+        direction = candidates[0][1]
+        current = candidates[0][2]
+        current_score = candidates[0][0]
+        worse_streak = 0 if current_score <= best_score else 1
+        steps_taken = 1
+
+        while steps_taken < max_steps:
+            cand = current + direction * step
+            if cand < bound_lo or cand > bound_hi:
+                break
+            angles = angles_full if steps_taken >= 2 else self._ANGLES_FAST
+            score = eval_offset(cand, angles)
+            steps_taken += 1
+            if score < best_score:
+                best_score = score
+                best_offset = cand
+                worse_streak = 0
+            else:
+                worse_streak += 1
+                if worse_streak >= self._MAX_WORSE_STREAK:
+                    self.log.emit(
+                        f"{axis.upper()} worsening twice; stopping early and backtracking."
+                    )
+                    break
+            current = cand
+
+        self.log.emit(
+            f"Best {axis.upper()} = {best_offset:.3f} mm (score {best_score:.3f})"
+        )
         return best_offset
 
     @staticmethod
@@ -141,7 +212,9 @@ class OffsetScanWorker(QtCore.QObject):
         count = int(round((end - start) / step)) + 1
         return [start + i * step for i in range(count)]
 
-    def _evaluate_offset(self, offset_x_mm: float, offset_y_mm: float) -> float:
+    def _evaluate_offset(
+        self, offset_x_mm: float, offset_y_mm: float, angles_count: int
+    ) -> float:
         prev_time = self._camera.get_last_frame_time()
         mask_u8 = self._vortex.build_mask(offset_x_mm, offset_y_mm)
         ok = self._slm.send_mask_to_slot(mask_u8, self._settings.slot)
@@ -168,53 +241,24 @@ class OffsetScanWorker(QtCore.QObject):
             raise RuntimeError("ROI is empty.")
 
         roi_gray = self._to_gray(roi)
-        debug_roi = None
-        polar = None
-        peaks = None
-        valid = None
+        cx_full, cy_full = self._settings.manual_center
+        radius = float(self._settings.manual_radius)
+        cx = float(cx_full) - float(x)
+        cy = float(cy_full) - float(y)
+        if not (0 <= cx < w and 0 <= cy < h):
+            raise RuntimeError("Manual center is outside the ROI.")
 
-        if cv2 is not None:
-            try:
-                rx, ry, ring_r, edges = self._find_ring_cv2_with_edges(roi_gray)
-                ring_center = (rx, ry)
-                score, polar, peaks, valid = self._score_warp_polar(roi_gray, ring_center)
-                if self._settings.debug_enabled:
-                    hole_center = self._safe_find_hole_center(roi_gray)
-                    debug_roi = self._draw_overlay(
-                        roi_gray, ring_center, ring_r, hole_center, edges
-                    )
-                    self.debug_data.emit(debug_roi, polar, peaks, valid)
-                self.log.emit(f"warpPolar score={score:.3f}")
-                return float(score)
-            except Exception as exc:
-                self.log.emit(f"warpPolar failed: {exc}; falling back to circle fit.")
-                if self._settings.debug_enabled:
-                    try:
-                        rx, ry, ring_r, edges = self._find_ring_cv2_with_edges(roi_gray)
-                        ring_center = (rx, ry)
-                    except Exception:
-                        ring_center, ring_r, edges = None, None, None
-                    hole_center = self._safe_find_hole_center(roi_gray)
-                    debug_roi = self._draw_overlay(
-                        roi_gray, ring_center, ring_r, hole_center, edges
-                    )
-                    self.debug_data.emit(debug_roi, polar, peaks, valid)
+        score, polar, peaks, valid, meta = self._score_manual_concentricity(
+            roi_gray, (cx, cy), radius, angles_count
+        )
 
-        score = self._score_center_distance(roi_gray)
         if self._settings.debug_enabled:
-            if cv2 is not None:
-                try:
-                    rx, ry, ring_r, edges = self._find_ring_cv2_with_edges(roi_gray)
-                    ring_center = (rx, ry)
-                except Exception:
-                    ring_center, ring_r, edges = None, None, None
-                hole_center = self._safe_find_hole_center(roi_gray)
-                debug_roi = self._draw_overlay(
-                    roi_gray, ring_center, ring_r, hole_center, edges
-                )
-                self.debug_data.emit(debug_roi, polar, peaks, valid)
-            else:
-                self.debug_data.emit(roi_gray, polar, peaks, valid)
+            debug_roi = self._draw_manual_overlay(roi_gray, (cx, cy), radius, meta)
+            self.debug_data.emit(debug_roi, polar, peaks, valid, meta)
+
+        self.log.emit(
+            f"manual concentricity score={score:.3f} px (valid {int(np.count_nonzero(valid))}/{len(valid)})"
+        )
         return float(score)
 
     @staticmethod
@@ -264,6 +308,141 @@ class OffsetScanWorker(QtCore.QObject):
         rx = float(xs2.mean())
         ry = float(ys2.mean())
         return (hx, hy), (rx, ry)
+
+    def _score_manual_concentricity(
+        self,
+        roi_gray: np.ndarray,
+        center: Tuple[float, float],
+        radius: float,
+        angles_count: int,
+    ) -> tuple[float, np.ndarray, np.ndarray, np.ndarray, dict]:
+        angles_count = max(self._ANGLES_FAST, int(angles_count))
+        img = roi_gray.astype(np.float32)
+        img_min = float(np.min(img))
+        img_max = float(np.max(img))
+        if img_max <= img_min:
+            raise RuntimeError("Flat image.")
+        img = (img - img_min) / (img_max - img_min)
+        img = (img * 255.0).astype(np.float32)
+        if cv2 is not None:
+            img = cv2.GaussianBlur(img, (5, 5), 0)
+
+        h, w = img.shape
+        cx, cy = center
+        if not (0 <= cx < w and 0 <= cy < h):
+            raise RuntimeError("Center outside ROI.")
+        max_r = min(cx, cy, (w - 1) - cx, (h - 1) - cy)
+        if max_r < 5:
+            raise RuntimeError("ROI too small.")
+
+        band = max(3.0, float(radius) * 0.35)
+        r_min = max(1.0, float(radius) - band)
+        r_max = min(float(max_r) - 1.0, float(radius) + band)
+        if r_max <= r_min + 1.0:
+            raise RuntimeError("Invalid radius band.")
+
+        angles = np.linspace(0.0, 2.0 * math.pi, angles_count, endpoint=False)
+        polar = self._sample_polar(img, center, r_min, r_max, angles)
+        if polar.size == 0:
+            raise RuntimeError("Polar sampling failed.")
+
+        peaks_idx = np.argmax(polar, axis=1)
+        max_per_angle = polar.max(axis=1)
+        step = (r_max - r_min) / max(1, (polar.shape[1] - 1))
+        peaks_r = r_min + peaks_idx * step
+
+        threshold = np.percentile(max_per_angle, 25.0)
+        valid = (max_per_angle >= threshold) & (peaks_idx > 0) & (
+            peaks_idx < (polar.shape[1] - 1)
+        )
+        if np.count_nonzero(valid) < self._ANGLES_FAST:
+            raise RuntimeError("Not enough valid angles for manual scoring.")
+
+        peaks_valid = peaks_r[valid].astype(np.float32)
+        score = float(np.std(peaks_valid))
+
+        fit_r, fit_dx, fit_dy = self._fit_radius_offset(angles[valid], peaks_valid)
+        fit_center = (float(cx + fit_dx), float(cy + fit_dy))
+
+        meta = {
+            "angles_deg": np.degrees(angles),
+            "max_per_angle": max_per_angle,
+            "fit_center": fit_center,
+            "fit_offset": (float(fit_dx), float(fit_dy)),
+            "fit_radius": float(fit_r),
+            "center": (float(cx), float(cy)),
+            "radius": float(radius),
+            "r_min": float(r_min),
+            "r_max": float(r_max),
+        }
+        return score, polar, peaks_r, valid, meta
+
+    def _sample_polar(
+        self,
+        img: np.ndarray,
+        center: Tuple[float, float],
+        r_min: float,
+        r_max: float,
+        angles: np.ndarray,
+    ) -> np.ndarray:
+        span = max(1.0, float(r_max - r_min))
+        samples = int(max(50, min(300, span * 3.0)))
+        radii = np.linspace(r_min, r_max, samples)
+        cos_t = np.cos(angles)[:, None]
+        sin_t = np.sin(angles)[:, None]
+        cx, cy = center
+        xs = cx + cos_t * radii[None, :]
+        ys = cy + sin_t * radii[None, :]
+
+        if cv2 is not None:
+            map_x = xs.astype(np.float32)
+            map_y = ys.astype(np.float32)
+            return cv2.remap(
+                img.astype(np.float32),
+                map_x,
+                map_y,
+                interpolation=cv2.INTER_LINEAR,
+                borderMode=cv2.BORDER_CONSTANT,
+                borderValue=0,
+            )
+        return self._bilinear_sample(img.astype(np.float32), xs, ys)
+
+    @staticmethod
+    def _bilinear_sample(img: np.ndarray, xs: np.ndarray, ys: np.ndarray) -> np.ndarray:
+        h, w = img.shape
+        x0 = np.floor(xs).astype(np.int32)
+        y0 = np.floor(ys).astype(np.int32)
+        x1 = x0 + 1
+        y1 = y0 + 1
+
+        x0c = np.clip(x0, 0, w - 1)
+        x1c = np.clip(x1, 0, w - 1)
+        y0c = np.clip(y0, 0, h - 1)
+        y1c = np.clip(y1, 0, h - 1)
+
+        wa = (x1 - xs) * (y1 - ys)
+        wb = (xs - x0) * (y1 - ys)
+        wc = (x1 - xs) * (ys - y0)
+        wd = (xs - x0) * (ys - y0)
+
+        Ia = img[y0c, x0c]
+        Ib = img[y0c, x1c]
+        Ic = img[y1c, x0c]
+        Id = img[y1c, x1c]
+
+        out = wa * Ia + wb * Ib + wc * Ic + wd * Id
+        mask = (xs >= 0) & (xs <= (w - 1)) & (ys >= 0) & (ys <= (h - 1))
+        out = np.where(mask, out, 0.0)
+        return out.astype(np.float32)
+
+    @staticmethod
+    def _fit_radius_offset(angles: np.ndarray, radii: np.ndarray) -> tuple[float, float, float]:
+        if angles.size < 3:
+            return float(np.mean(radii)), 0.0, 0.0
+        a = np.column_stack([np.ones_like(angles), np.cos(angles), np.sin(angles)])
+        sol, _, _, _ = np.linalg.lstsq(a, radii, rcond=None)
+        r0, dx, dy = sol
+        return float(r0), float(dx), float(dy)
 
     def _score_warp_polar(
         self, roi_gray: np.ndarray, center: Tuple[float, float]
@@ -476,6 +655,28 @@ class OffsetScanWorker(QtCore.QObject):
         except Exception:
             return None
 
+    def _draw_manual_overlay(
+        self,
+        roi_gray: np.ndarray,
+        center: Tuple[float, float],
+        radius: float,
+        meta: Optional[dict] = None,
+    ) -> np.ndarray:
+        base = self._normalize_to_u8(roi_gray)
+        if cv2 is None:
+            return base
+        color = cv2.cvtColor(base, cv2.COLOR_GRAY2BGR)
+        cx, cy = int(round(center[0])), int(round(center[1]))
+        cv2.circle(color, (cx, cy), int(round(radius)), (0, 200, 0), 1)
+        cv2.drawMarker(color, (cx, cy), (0, 0, 255), markerType=cv2.MARKER_CROSS)
+        if meta is not None and "fit_center" in meta:
+            fx, fy = meta["fit_center"]
+            fx_i, fy_i = int(round(fx)), int(round(fy))
+            cv2.drawMarker(
+                color, (fx_i, fy_i), (0, 255, 255), markerType=cv2.MARKER_CROSS
+            )
+        return color
+
     def _draw_overlay(
         self,
         roi_gray: np.ndarray,
@@ -537,10 +738,13 @@ class DebugWindow(QtWidgets.QDialog):
         self.lbl_roi_title = QtWidgets.QLabel("ROI (grayscale)")
         self.lbl_polar_title = QtWidgets.QLabel("Polar unwrap")
         self.lbl_peaks_title = QtWidgets.QLabel("Peaks (radius vs angle)")
+        self.lbl_data_title = QtWidgets.QLabel("Angle data")
 
         self.lbl_roi = QtWidgets.QLabel()
         self.lbl_polar = QtWidgets.QLabel()
         self.lbl_peaks = QtWidgets.QLabel()
+        self.txt_data = QtWidgets.QPlainTextEdit(readOnly=True)
+        self.txt_data.setMaximumBlockCount(10000)
         for lbl in (self.lbl_roi, self.lbl_polar, self.lbl_peaks):
             lbl.setFrameStyle(QtWidgets.QFrame.Box | QtWidgets.QFrame.Plain)
             lbl.setAlignment(QtCore.Qt.AlignCenter)
@@ -555,9 +759,16 @@ class DebugWindow(QtWidgets.QDialog):
         layout.addWidget(self.lbl_peaks_title, 2, 0, 1, 2)
         layout.addWidget(self.lbl_peaks, 3, 0, 1, 2)
         layout.addWidget(self.lbl_stats, 4, 0, 1, 2)
+        layout.addWidget(self.lbl_data_title, 5, 0, 1, 2)
+        layout.addWidget(self.txt_data, 6, 0, 1, 2)
 
     def update_views(
-        self, roi_gray: np.ndarray, polar: np.ndarray, peaks: np.ndarray, valid: np.ndarray
+        self,
+        roi_gray: np.ndarray,
+        polar: np.ndarray,
+        peaks: np.ndarray,
+        valid: np.ndarray,
+        meta: dict,
     ) -> None:
         self._roi_pixmap = self._gray_to_pixmap(roi_gray) if roi_gray is not None else None
         self._polar_pixmap = self._gray_to_pixmap(polar) if polar is not None else None
@@ -567,11 +778,18 @@ class DebugWindow(QtWidgets.QDialog):
         if peaks is not None and len(peaks) > 0:
             valid_count = int(np.count_nonzero(valid)) if valid is not None else len(peaks)
             std = float(np.std(peaks[valid])) if valid is not None else float(np.std(peaks))
+            extra = ""
+            if meta:
+                fit = meta.get("fit_offset")
+                if fit:
+                    extra = f" | Fit dx,dy: ({fit[0]:.2f}, {fit[1]:.2f})"
             self.lbl_stats.setText(
-                f"Angles: {len(peaks)} | Valid: {valid_count} | Peaks std: {std:.3f}"
+                f"Angles: {len(peaks)} | Valid: {valid_count} | Peaks std: {std:.3f}{extra}"
             )
         else:
             self.lbl_stats.setText("No peaks data.")
+
+        self._update_data_table(peaks, valid, meta)
 
     def resizeEvent(self, event: QtGui.QResizeEvent) -> None:
         super().resizeEvent(event)
@@ -590,6 +808,45 @@ class DebugWindow(QtWidgets.QDialog):
             self.lbl_peaks.setPixmap(self._scaled(self._peaks_pixmap, self.lbl_peaks))
         else:
             self.lbl_peaks.clear()
+
+    def _update_data_table(
+        self, peaks: np.ndarray, valid: np.ndarray, meta: Optional[dict]
+    ) -> None:
+        if peaks is None or meta is None or "angles_deg" not in meta:
+            self.txt_data.setPlainText("No data.")
+            return
+        angles = meta.get("angles_deg")
+        max_per = meta.get("max_per_angle")
+        if angles is None:
+            self.txt_data.setPlainText("No data.")
+            return
+        if valid is None or len(valid) != len(peaks):
+            valid = np.ones(len(peaks), dtype=bool)
+
+        lines = []
+        if "center" in meta and "radius" in meta:
+            cx, cy = meta["center"]
+            radius = meta["radius"]
+            r_min = meta.get("r_min")
+            r_max = meta.get("r_max")
+            lines.append(
+                f"center=({cx:.2f}, {cy:.2f}) radius={radius:.2f} "
+                f"r_min={r_min:.2f} r_max={r_max:.2f}"
+            )
+        if "fit_center" in meta:
+            fx, fy = meta["fit_center"]
+            lines.append(f"fit_center=({fx:.2f}, {fy:.2f})")
+        for i, angle in enumerate(angles):
+            peak_r = peaks[i] if i < len(peaks) else float("nan")
+            max_val = (
+                max_per[i] if max_per is not None and i < len(max_per) else float("nan")
+            )
+            val = 1 if bool(valid[i]) else 0
+            lines.append(
+                f"{i:03d} angle={angle:6.1f} deg peak_r={peak_r:7.2f} "
+                f"max={max_val:7.1f} valid={val}"
+            )
+        self.txt_data.setPlainText("\n".join(lines))
 
     @staticmethod
     def _scaled(pix: QtGui.QPixmap, label: QtWidgets.QLabel) -> QtGui.QPixmap:
@@ -675,12 +932,16 @@ class DonutOptimizationWindow(QtWidgets.QDialog):
         self._thread: Optional[QtCore.QThread] = None
         self._worker: Optional[OffsetScanWorker] = None
         self._debug_window: Optional[DebugWindow] = None
+        self._manual_center: Optional[Tuple[float, float]] = None
+        self._manual_radius: Optional[float] = None
 
         self.setWindowTitle("Donut Optimization Wizard")
         self.resize(600, 520)
 
         self._build_ui()
         self._camera.roi_changed.connect(self._on_roi_changed)
+        self._camera.point_selected.connect(self._on_point_selected)
+        self._camera.circle_selected.connect(self._on_circle_selected)
 
     def _build_ui(self) -> None:
         layout = QtWidgets.QVBoxLayout(self)
@@ -695,7 +956,25 @@ class DonutOptimizationWindow(QtWidgets.QDialog):
         roi_layout.addWidget(self.btn_select_roi)
         layout.addWidget(roi_group)
 
-        scan_group = QtWidgets.QGroupBox("2) Scan Settings (mm)")
+        manual_group = QtWidgets.QGroupBox("2) Manual Target")
+        manual_layout = QtWidgets.QGridLayout(manual_group)
+        self.lbl_manual_center = QtWidgets.QLabel("Dark spot: not set")
+        self.lbl_manual_radius = QtWidgets.QLabel("Circle: not set")
+        self.btn_pick_center = QtWidgets.QPushButton("Pick dark spot")
+        self.btn_pick_center.clicked.connect(self._pick_dark_spot)
+        self.btn_pick_circle = QtWidgets.QPushButton("Draw donut circle")
+        self.btn_pick_circle.clicked.connect(self._pick_donut_circle)
+        self.btn_clear_manual = QtWidgets.QPushButton("Clear")
+        self.btn_clear_manual.clicked.connect(self._clear_manual_target)
+
+        manual_layout.addWidget(self.lbl_manual_center, 0, 0, 1, 2)
+        manual_layout.addWidget(self.lbl_manual_radius, 1, 0, 1, 2)
+        manual_layout.addWidget(self.btn_pick_center, 0, 2)
+        manual_layout.addWidget(self.btn_pick_circle, 1, 2)
+        manual_layout.addWidget(self.btn_clear_manual, 0, 3, 2, 1)
+        layout.addWidget(manual_group)
+
+        scan_group = QtWidgets.QGroupBox("3) Scan Settings (mm)")
         scan_layout = QtWidgets.QGridLayout(scan_group)
         r = 0
         self.dsb_x_range = QtWidgets.QDoubleSpinBox()
@@ -771,6 +1050,13 @@ class DonutOptimizationWindow(QtWidgets.QDialog):
         scan_layout.addWidget(self.spin_settle, r, 1)
         scan_layout.addWidget(QtWidgets.QLabel("SLM slot"), r, 2)
         scan_layout.addWidget(self.spin_slot, r, 3)
+        r += 1
+
+        self.spin_angles = QtWidgets.QSpinBox()
+        self.spin_angles.setRange(4, 360)
+        self.spin_angles.setValue(10)
+        scan_layout.addWidget(QtWidgets.QLabel("Angles"), r, 0)
+        scan_layout.addWidget(self.spin_angles, r, 1)
 
         layout.addWidget(scan_group)
 
@@ -813,6 +1099,55 @@ class DonutOptimizationWindow(QtWidgets.QDialog):
     def _on_roi_changed(self, roi: Tuple[int, int, int, int]) -> None:
         self.lbl_roi.setText(f"ROI: {roi}")
 
+    def _pick_dark_spot(self) -> None:
+        if not self._camera.is_running():
+            self._append_error("Camera must be running.")
+            return
+        self._camera.begin_point_selection()
+
+    def _pick_donut_circle(self) -> None:
+        if not self._camera.is_running():
+            self._append_error("Camera must be running.")
+            return
+        if self._manual_center is None:
+            self._append_error("Pick the dark spot center first.")
+            return
+        self._camera.begin_circle_selection(self._manual_center)
+
+    def _clear_manual_target(self) -> None:
+        self._manual_center = None
+        self._manual_radius = None
+        self._update_manual_labels()
+        self._camera.clear_manual_marks()
+
+    def _on_point_selected(self, point: Tuple[float, float]) -> None:
+        self._manual_center = (float(point[0]), float(point[1]))
+        self._update_manual_labels()
+        self._append_log(
+            f"Dark spot set: ({self._manual_center[0]:.1f}, {self._manual_center[1]:.1f})"
+        )
+
+    def _on_circle_selected(self, circle: Tuple[float, float, float]) -> None:
+        cx, cy, r = circle
+        self._manual_center = (float(cx), float(cy))
+        self._manual_radius = float(r)
+        self._update_manual_labels()
+        self._append_log(
+            f"Donut circle set: center=({cx:.1f}, {cy:.1f}) radius={r:.1f}"
+        )
+
+    def _update_manual_labels(self) -> None:
+        if self._manual_center is None:
+            self.lbl_manual_center.setText("Dark spot: not set")
+        else:
+            self.lbl_manual_center.setText(
+                f"Dark spot: ({self._manual_center[0]:.1f}, {self._manual_center[1]:.1f})"
+            )
+        if self._manual_radius is None:
+            self.lbl_manual_radius.setText("Circle: not set")
+        else:
+            self.lbl_manual_radius.setText(f"Circle radius: {self._manual_radius:.1f} px")
+
     def _start(self) -> None:
         if not self._camera.is_running():
             self._append_error("Camera must be running.")
@@ -820,6 +1155,17 @@ class DonutOptimizationWindow(QtWidgets.QDialog):
         roi = self._camera.get_roi()
         if roi is None:
             self._append_error("Please select ROI first.")
+            return
+        if self._manual_center is None or self._manual_radius is None:
+            self._append_error("Please pick the dark spot and draw the donut circle.")
+            return
+        cx, cy = self._manual_center
+        x, y, w, h = roi
+        if not (x <= cx < x + w and y <= cy < y + h):
+            self._append_error("Manual center must be inside the ROI.")
+            return
+        if self._manual_radius <= 0:
+            self._append_error("Manual circle radius must be > 0.")
             return
         if self._thread is not None:
             return
@@ -837,6 +1183,9 @@ class DonutOptimizationWindow(QtWidgets.QDialog):
             settle_ms=int(self.spin_settle.value()),
             slot=int(self.spin_slot.value()),
             debug_enabled=self.chk_debug.isChecked(),
+            angles_count=int(self.spin_angles.value()),
+            manual_center=(float(cx), float(cy)),
+            manual_radius=float(self._manual_radius),
         )
 
         self._thread = QtCore.QThread(self)
@@ -890,9 +1239,14 @@ class DonutOptimizationWindow(QtWidgets.QDialog):
         self._debug_window.activateWindow()
 
     def _on_debug_data(
-        self, roi_gray: np.ndarray, polar: np.ndarray, peaks: np.ndarray, valid: np.ndarray
+        self,
+        roi_gray: np.ndarray,
+        polar: np.ndarray,
+        peaks: np.ndarray,
+        valid: np.ndarray,
+        meta: dict,
     ) -> None:
         if self._debug_window is None:
             self._debug_window = DebugWindow(self)
         if self.chk_debug.isChecked():
-            self._debug_window.update_views(roi_gray, polar, peaks, valid)
+            self._debug_window.update_views(roi_gray, polar, peaks, valid, meta)

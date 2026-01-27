@@ -86,6 +86,8 @@ class CameraWorker(QtCore.QObject):
 class CameraWindow(QtWidgets.QWidget):
     visibility_changed = QtCore.Signal(bool)
     roi_changed = QtCore.Signal(object)
+    point_selected = QtCore.Signal(object)
+    circle_selected = QtCore.Signal(object)
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -105,6 +107,12 @@ class CameraWindow(QtWidgets.QWidget):
         self._roi_selecting = False
         self._roi_start = QtCore.QPoint()
         self._roi_band: Optional[QtWidgets.QRubberBand] = None
+        self._point_selecting = False
+        self._circle_selecting = False
+        self._circle_dragging = False
+        self._selected_point: Optional[Tuple[float, float]] = None
+        self._selected_circle_center: Optional[Tuple[float, float]] = None
+        self._selected_circle_radius: Optional[float] = None
 
         self.setWindowTitle("Camera Viewer")
         self.resize(900, 700)
@@ -229,22 +237,7 @@ class CameraWindow(QtWidgets.QWidget):
             self._last_frame = frame.copy()
             self._last_fmt = fmt
             self._last_frame_time = time.monotonic()
-        if frame.ndim == 2:
-            qimg = _gray_to_qimage(frame)
-        else:
-            if fmt == "rgb8":
-                qimg = _rgb_to_qimage(frame)
-            else:
-                qimg = _bgr_to_qimage(frame)
-        pix = QtGui.QPixmap.fromImage(qimg)
-        self.lbl_view.setPixmap(
-            pix.scaled(
-                self.lbl_view.size(),
-                QtCore.Qt.KeepAspectRatio,
-                QtCore.Qt.SmoothTransformation,
-            )
-        )
-        self._update_roi_overlay()
+        self._render_frame(frame, fmt)
 
     def _append_log(self, text: str) -> None:
         self.log.appendPlainText(text)
@@ -327,34 +320,119 @@ class CameraWindow(QtWidgets.QWidget):
         if self._thread is None:
             self._append_error("Camera is not running.")
             return
+        self._clear_selection_modes()
         self._roi_selecting = True
         self._append_log("Drag to select ROI on the image.")
+
+    def begin_point_selection(self) -> None:
+        if self._thread is None:
+            self._append_error("Camera is not running.")
+            return
+        self._clear_selection_modes()
+        self._point_selecting = True
+        self._append_log("Click to select the dark spot center.")
+
+    def begin_circle_selection(self, center: Optional[Tuple[float, float]] = None) -> None:
+        if self._thread is None:
+            self._append_error("Camera is not running.")
+            return
+        self._clear_selection_modes()
+        self._circle_selecting = True
+        self._circle_dragging = False
+        if center is not None:
+            self._selected_circle_center = (float(center[0]), float(center[1]))
+        self._selected_circle_radius = None
+        self._append_log("Drag to set the donut circle radius.")
+        self._refresh_last_frame()
+
+    def clear_manual_marks(self) -> None:
+        self._selected_point = None
+        self._selected_circle_center = None
+        self._selected_circle_radius = None
+        self._refresh_last_frame()
 
     def get_roi(self) -> Optional[Tuple[int, int, int, int]]:
         with self._roi_lock:
             return self._roi
 
     def eventFilter(self, obj, event) -> bool:
-        if obj is self.lbl_view and self._roi_selecting:
-            if event.type() == QtCore.QEvent.MouseButtonPress:
-                self._roi_start = event.position().toPoint()
-                if self._roi_band is not None:
-                    self._roi_band.setGeometry(QtCore.QRect(self._roi_start, QtCore.QSize()))
-                    self._roi_band.show()
-                return True
-            if event.type() == QtCore.QEvent.MouseMove:
-                if not self._roi_start.isNull():
-                    rect = QtCore.QRect(self._roi_start, event.position().toPoint()).normalized()
+        if obj is self.lbl_view:
+            if self._roi_selecting:
+                if event.type() == QtCore.QEvent.MouseButtonPress:
+                    self._roi_start = event.position().toPoint()
                     if self._roi_band is not None:
-                        self._roi_band.setGeometry(rect)
-                return True
-            if event.type() == QtCore.QEvent.MouseButtonRelease:
-                rect = self._roi_band.geometry() if self._roi_band is not None else QtCore.QRect()
-                self._roi_selecting = False
-                self._set_roi_from_label_rect(rect)
-                if self._roi_band is not None:
-                    self._roi_band.hide()
-                return True
+                        self._roi_band.setGeometry(
+                            QtCore.QRect(self._roi_start, QtCore.QSize())
+                        )
+                        self._roi_band.show()
+                    return True
+                if event.type() == QtCore.QEvent.MouseMove:
+                    if not self._roi_start.isNull():
+                        rect = QtCore.QRect(
+                            self._roi_start, event.position().toPoint()
+                        ).normalized()
+                        if self._roi_band is not None:
+                            self._roi_band.setGeometry(rect)
+                    return True
+                if event.type() == QtCore.QEvent.MouseButtonRelease:
+                    rect = (
+                        self._roi_band.geometry()
+                        if self._roi_band is not None
+                        else QtCore.QRect()
+                    )
+                    self._roi_selecting = False
+                    self._set_roi_from_label_rect(rect)
+                    if self._roi_band is not None:
+                        self._roi_band.hide()
+                    return True
+            if self._point_selecting:
+                if event.type() == QtCore.QEvent.MouseButtonPress:
+                    pos = self._label_pos_to_image(event.position())
+                    if pos is not None:
+                        self._selected_point = (float(pos[0]), float(pos[1]))
+                        self._selected_circle_center = self._selected_point
+                        self._point_selecting = False
+                        self.point_selected.emit(self._selected_point)
+                        self._refresh_last_frame()
+                    return True
+            if self._circle_selecting:
+                if event.type() == QtCore.QEvent.MouseButtonPress:
+                    pos = self._label_pos_to_image(event.position())
+                    if pos is None:
+                        return True
+                    if self._selected_circle_center is None:
+                        self._selected_circle_center = (float(pos[0]), float(pos[1]))
+                    self._circle_dragging = True
+                    self._update_circle_radius_from_pos(pos)
+                    self._refresh_last_frame()
+                    return True
+                if event.type() == QtCore.QEvent.MouseMove:
+                    if self._circle_dragging:
+                        pos = self._label_pos_to_image(event.position())
+                        if pos is not None:
+                            self._update_circle_radius_from_pos(pos)
+                            self._refresh_last_frame()
+                    return True
+                if event.type() == QtCore.QEvent.MouseButtonRelease:
+                    if self._circle_dragging:
+                        pos = self._label_pos_to_image(event.position())
+                        if pos is not None:
+                            self._update_circle_radius_from_pos(pos)
+                        self._circle_dragging = False
+                        self._circle_selecting = False
+                        if (
+                            self._selected_circle_center is not None
+                            and self._selected_circle_radius is not None
+                            and self._selected_circle_radius >= 2.0
+                        ):
+                            payload = (
+                                float(self._selected_circle_center[0]),
+                                float(self._selected_circle_center[1]),
+                                float(self._selected_circle_radius),
+                            )
+                            self.circle_selected.emit(payload)
+                        self._refresh_last_frame()
+                    return True
         return super().eventFilter(obj, event)
 
     def _set_roi_from_label_rect(self, rect: QtCore.QRect) -> None:
@@ -437,3 +515,126 @@ class CameraWindow(QtWidgets.QWidget):
                 return None
             h, w = self._last_frame.shape[:2]
             return int(w), int(h)
+
+    def _render_frame(self, frame: np.ndarray, fmt: str) -> None:
+        if frame.ndim == 2:
+            qimg = _gray_to_qimage(frame)
+        else:
+            if fmt == "rgb8":
+                qimg = _rgb_to_qimage(frame)
+            else:
+                qimg = _bgr_to_qimage(frame)
+        pix = QtGui.QPixmap.fromImage(qimg)
+        pix = pix.scaled(
+            self.lbl_view.size(),
+            QtCore.Qt.KeepAspectRatio,
+            QtCore.Qt.SmoothTransformation,
+        )
+        pix = self._draw_overlay_on_pixmap(pix, frame.shape[1], frame.shape[0])
+        self.lbl_view.setPixmap(pix)
+        self._update_roi_overlay()
+
+    def _refresh_last_frame(self) -> None:
+        with self._frame_lock:
+            if self._last_frame is None:
+                return
+            frame = self._last_frame.copy()
+            fmt = self._last_fmt
+        self._render_frame(frame, fmt)
+
+    def _draw_overlay_on_pixmap(
+        self, pix: QtGui.QPixmap, img_w: int, img_h: int
+    ) -> QtGui.QPixmap:
+        if (
+            self._selected_point is None
+            and self._selected_circle_center is None
+            and self._selected_circle_radius is None
+        ):
+            return pix
+        if img_w <= 0 or img_h <= 0:
+            return pix
+        scale = pix.width() / float(img_w)
+        if scale <= 0:
+            return pix
+        out = pix.copy()
+        painter = QtGui.QPainter(out)
+        painter.setRenderHint(QtGui.QPainter.Antialiasing, True)
+
+        if self._selected_circle_center is not None:
+            cx, cy = self._selected_circle_center
+            pen = QtGui.QPen(QtGui.QColor(0, 200, 0), 2)
+            painter.setPen(pen)
+            if self._selected_circle_radius is not None:
+                r = self._selected_circle_radius * scale
+                painter.drawEllipse(
+                    QtCore.QPointF(cx * scale, cy * scale), r, r
+                )
+            painter.drawLine(
+                int(cx * scale) - 6,
+                int(cy * scale),
+                int(cx * scale) + 6,
+                int(cy * scale),
+            )
+            painter.drawLine(
+                int(cx * scale),
+                int(cy * scale) - 6,
+                int(cx * scale),
+                int(cy * scale) + 6,
+            )
+
+        if self._selected_point is not None:
+            x, y = self._selected_point
+            pen = QtGui.QPen(QtGui.QColor(255, 60, 60), 2)
+            painter.setPen(pen)
+            painter.drawLine(
+                int(x * scale) - 6,
+                int(y * scale),
+                int(x * scale) + 6,
+                int(y * scale),
+            )
+            painter.drawLine(
+                int(x * scale),
+                int(y * scale) - 6,
+                int(x * scale),
+                int(y * scale) + 6,
+            )
+
+        painter.end()
+        return out
+
+    def _label_pos_to_image(self, pos: QtCore.QPointF) -> Optional[Tuple[float, float]]:
+        frame_size = self._get_frame_size()
+        if frame_size is None:
+            return None
+        img_w, img_h = frame_size
+        label_rect = self.lbl_view.contentsRect()
+        if img_w <= 0 or img_h <= 0:
+            return None
+        scale = min(label_rect.width() / img_w, label_rect.height() / img_h)
+        if scale <= 0:
+            return None
+        disp_w = img_w * scale
+        disp_h = img_h * scale
+        x0 = label_rect.x() + (label_rect.width() - disp_w) / 2
+        y0 = label_rect.y() + (label_rect.height() - disp_h) / 2
+        x = float(pos.x()) - x0
+        y = float(pos.y()) - y0
+        if x < 0 or y < 0 or x > disp_w or y > disp_h:
+            return None
+        return (x / scale, y / scale)
+
+    def _update_circle_radius_from_pos(self, pos: Tuple[float, float]) -> None:
+        if self._selected_circle_center is None:
+            return
+        cx, cy = self._selected_circle_center
+        dx = float(pos[0]) - float(cx)
+        dy = float(pos[1]) - float(cy)
+        self._selected_circle_radius = float((dx * dx + dy * dy) ** 0.5)
+
+    def _clear_selection_modes(self) -> None:
+        self._roi_selecting = False
+        self._point_selecting = False
+        self._circle_selecting = False
+        self._circle_dragging = False
+        if self._roi_band is not None:
+            self._roi_band.hide()
