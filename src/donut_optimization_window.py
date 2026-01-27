@@ -33,6 +33,7 @@ class ScanSettings:
     slot: int
     debug_enabled: bool
     angles_count: int
+    # Reference center used for scoring (a user-provided hint; not assumed exact)
     manual_center: Tuple[float, float]
     manual_radius: float
 
@@ -362,7 +363,10 @@ class OffsetScanWorker(QtCore.QObject):
                 continue
 
             peaks_idx = np.argmax(polar, axis=1)
-            max_per_angle = polar.max(axis=1)
+        max_per_angle = polar.max(axis=1)
+        # Be robust to any NaNs/Infs that can appear from sampling/normalization.
+        if not np.isfinite(max_per_angle).all():
+            max_per_angle = np.nan_to_num(max_per_angle, nan=0.0, posinf=0.0, neginf=0.0)
             step = (r_max - r_min) / max(1, (polar.shape[1] - 1))
             peaks_r = r_min + peaks_idx * step
 
@@ -372,6 +376,7 @@ class OffsetScanWorker(QtCore.QObject):
                 valid = valid & (peaks_idx > 0) & (peaks_idx < (polar.shape[1] - 1))
 
             n_valid = int(np.count_nonzero(valid))
+            min_required = max(3, min(int(angles_count), int(self._ANGLES_FAST)))
             last_diag = {
                 "reason": "too_few_valid" if n_valid < self._ANGLES_FAST else "ok",
                 "band_scale": float(band_scale),
@@ -382,8 +387,9 @@ class OffsetScanWorker(QtCore.QObject):
                 "radius": float(radius),
                 "r_min": float(r_min),
                 "r_max": float(r_max),
+                "min_required": int(min_required),
             }
-            if n_valid >= self._ANGLES_FAST:
+            if n_valid >= min_required:
                 break
 
         if last_diag is None or last_diag.get("reason") != "ok":
@@ -395,9 +401,13 @@ class OffsetScanWorker(QtCore.QObject):
             )
 
         peaks_valid = peaks_r[valid].astype(np.float32)
-        score = float(np.std(peaks_valid))
-
+        # Estimate ring center offset from the provided reference center using a simple
+        # sinusoidal model: r(theta) = r0 + dx*cos(theta) + dy*sin(theta).
+        # Here dx/dy are the center mismatch (in pixels). We score the *magnitude*
+        # of that mismatch so the reference center is treated as a hint, not truth.
         fit_r, fit_dx, fit_dy = self._fit_radius_offset(angles[valid], peaks_valid)
+        score = float(math.hypot(float(fit_dx), float(fit_dy)))
+
         fit_center = (float(cx + fit_dx), float(cy + fit_dy))
 
         meta = {
@@ -410,6 +420,7 @@ class OffsetScanWorker(QtCore.QObject):
             "radius": float(radius),
             "r_min": float(r_min),
             "r_max": float(r_max),
+            "peaks_std_px": float(np.std(peaks_valid)),
         }
         return score, polar, peaks_r, valid, meta
 
@@ -968,8 +979,10 @@ class DonutOptimizationWindow(QtWidgets.QDialog):
         self._thread: Optional[QtCore.QThread] = None
         self._worker: Optional[OffsetScanWorker] = None
         self._debug_window: Optional[DebugWindow] = None
-        self._manual_center: Optional[Tuple[float, float]] = None
-        self._manual_radius: Optional[float] = None
+        # User hints (not assumed exact)
+        self._manual_center: Optional[Tuple[float, float]] = None  # "dark spot" hint
+        self._circle_center: Optional[Tuple[float, float]] = None  # circle center hint
+        self._manual_radius: Optional[float] = None  # circle radius
 
         self.setWindowTitle("Donut Optimization Wizard")
         self.resize(600, 520)
@@ -997,7 +1010,7 @@ class DonutOptimizationWindow(QtWidgets.QDialog):
 
         manual_group = QtWidgets.QGroupBox("2) Manual Target")
         manual_layout = QtWidgets.QGridLayout(manual_group)
-        self.lbl_manual_center = QtWidgets.QLabel("Dark spot: not set")
+        self.lbl_manual_center = QtWidgets.QLabel("Hint (dark spot): not set")
         self.lbl_manual_radius = QtWidgets.QLabel("Circle: not set")
         self.btn_pick_center = QtWidgets.QPushButton("Pick dark spot")
         self.btn_pick_center.clicked.connect(self._pick_dark_spot)
@@ -1162,6 +1175,7 @@ class DonutOptimizationWindow(QtWidgets.QDialog):
 
     def _clear_manual_target(self) -> None:
         self._manual_center = None
+        self._circle_center = None
         self._manual_radius = None
         self._update_manual_labels()
         self._camera.clear_manual_marks()
@@ -1175,6 +1189,7 @@ class DonutOptimizationWindow(QtWidgets.QDialog):
 
     def _on_circle_selected(self, circle: Tuple[float, float, float]) -> None:
         cx, cy, r = circle
+        self._circle_center = (float(cx), float(cy))
         self._manual_radius = float(r)
         self._update_manual_labels()
         self._append_log(
@@ -1183,28 +1198,58 @@ class DonutOptimizationWindow(QtWidgets.QDialog):
 
     def _update_manual_labels(self) -> None:
         if self._manual_center is None:
-            self.lbl_manual_center.setText("Dark spot: not set")
+            self.lbl_manual_center.setText("Hint (dark spot): not set")
         else:
             self.lbl_manual_center.setText(
-                f"Dark spot: ({self._manual_center[0]:.1f}, {self._manual_center[1]:.1f})"
+                f"Hint (dark spot): ({self._manual_center[0]:.1f}, {self._manual_center[1]:.1f})"
             )
         if self._manual_radius is None:
             self.lbl_manual_radius.setText("Circle: not set")
         else:
-            self.lbl_manual_radius.setText(f"Circle radius: {self._manual_radius:.1f} px")
+            if self._circle_center is None:
+                self.lbl_manual_radius.setText(f"Circle radius: {self._manual_radius:.1f} px")
+            else:
+                self.lbl_manual_radius.setText(
+                    f"Circle: center=({self._circle_center[0]:.1f},{self._circle_center[1]:.1f}), "
+                    f"r={self._manual_radius:.1f} px"
+                )
 
     def _start(self) -> None:
         if not self._camera.is_running():
             self._append_error("Camera must be running.")
             return
+        if self._manual_radius is None:
+            self._append_error("Please draw the donut circle (radius).")
+            return
+        # Choose a reference center for scoring (circle center preferred; dark-spot fallback).
+        ref_center = self._circle_center or self._manual_center
+        if ref_center is None:
+            self._append_error("Please pick a reference center (dark spot or circle center).")
+            return
         roi = self._camera.get_roi()
         if roi is None:
-            self._append_error("Please select ROI first.")
-            return
-        if self._manual_center is None or self._manual_radius is None:
-            self._append_error("Please pick the dark spot and draw the donut circle.")
-            return
-        cx, cy = self._manual_center
+            # ROI is optional: auto-derive a reasonable crop from the picked center+radius.
+            frame = self._camera.get_last_frame()
+            if frame is None:
+                self._append_error("No camera frame available (cannot auto-set ROI).")
+                return
+            img_h, img_w = frame.shape[:2]
+            cx_f, cy_f = ref_center
+            r = float(self._manual_radius)
+            margin = max(40.0, 0.6 * r)
+            half = int(round(min(max(r + margin, 80.0), 0.49 * min(img_w, img_h))))
+            cx_i = int(round(cx_f))
+            cy_i = int(round(cy_f))
+            x0 = max(0, cx_i - half)
+            y0 = max(0, cy_i - half)
+            x1 = min(img_w, cx_i + half)
+            y1 = min(img_h, cy_i + half)
+            if x1 <= x0 or y1 <= y0:
+                self._append_error("Auto ROI failed (invalid crop).")
+                return
+            roi = (int(x0), int(y0), int(x1 - x0), int(y1 - y0))
+            self.lbl_roi.setText(f"ROI: {roi} (auto)")
+        cx, cy = ref_center
         x, y, w, h = roi
         if not (x <= cx < x + w and y <= cy < y + h):
             self._append_error("Manual center must be inside the ROI.")
