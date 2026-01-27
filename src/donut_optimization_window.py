@@ -38,6 +38,7 @@ class ScanSettings:
     threshold_px: float
     filter_enabled: bool
     filter_threshold: float
+    fast_search: bool
 
 
 class OffsetScanWorker(QtCore.QObject):
@@ -697,6 +698,11 @@ class CostScanWorker(QtCore.QObject):
         self._running = False
 
     def _run_scan(self) -> Tuple[float, float, str]:
+        if self._settings.fast_search:
+            return self._run_fast_search()
+        return self._run_snake_scan()
+
+    def _run_snake_scan(self) -> Tuple[float, float, str]:
         center_x, center_y = self._vortex.get_offsets_mm()
         xs = OffsetScanWorker._build_offsets(
             center_x, self._settings.x_range_mm, self._settings.x_step_mm
@@ -730,8 +736,138 @@ class CostScanWorker(QtCore.QObject):
                 )
 
         csv_path = self._write_csv(results)
-        self.log.emit(f"Scan complete. Best cost={best_cost:.4f} at x={best_x:.3f} y={best_y:.3f}")
+        self.log.emit(
+            f"Scan complete. Best cost={best_cost:.4f} at x={best_x:.3f} y={best_y:.3f}"
+        )
         return best_x, best_y, csv_path
+
+    def _run_fast_search(self) -> Tuple[float, float, str]:
+        center_x, center_y = self._vortex.get_offsets_mm()
+        bound_x_lo = center_x - self._settings.x_range_mm
+        bound_x_hi = center_x + self._settings.x_range_mm
+        bound_y_lo = center_y - self._settings.y_range_mm
+        bound_y_hi = center_y + self._settings.y_range_mm
+
+        step_x = float(self._settings.x_step_mm)
+        step_y = float(self._settings.y_step_mm)
+        min_step_x = max(step_x * 0.1, 0.001)
+        min_step_y = max(step_y * 0.1, 0.001)
+
+        results: list[tuple[float, float, float]] = []
+        best_x, best_y = center_x, center_y
+        best_cost = self._evaluate_cost(best_x, best_y)
+        results.append((best_x, best_y, best_cost))
+        self.log.emit(
+            f"Fast search start x={best_x:.3f} y={best_y:.3f} cost={best_cost:.4f}"
+        )
+
+        progress_est = max(
+            4, int((self._settings.x_range_mm / min_step_x) + (self._settings.y_range_mm / min_step_y))
+        )
+        count = 1
+
+        improved = True
+        while improved and (step_x >= min_step_x or step_y >= min_step_y):
+            improved = False
+
+            best_x, best_y, best_cost, step_x, count, improved = self._walk_axis(
+                axis="x",
+                center=(best_x, best_y),
+                step=step_x,
+                min_step=min_step_x,
+                bounds=(bound_x_lo, bound_x_hi),
+                best_cost=best_cost,
+                results=results,
+                count=count,
+                total=progress_est,
+            )
+
+            best_x, best_y, best_cost, step_y, count, improved_y = self._walk_axis(
+                axis="y",
+                center=(best_x, best_y),
+                step=step_y,
+                min_step=min_step_y,
+                bounds=(bound_y_lo, bound_y_hi),
+                best_cost=best_cost,
+                results=results,
+                count=count,
+                total=progress_est,
+            )
+            improved = improved or improved_y
+
+        csv_path = self._write_csv(results)
+        self.log.emit(
+            f"Fast search complete. Best cost={best_cost:.4f} at x={best_x:.3f} y={best_y:.3f}"
+        )
+        return best_x, best_y, csv_path
+
+    def _walk_axis(
+        self,
+        axis: str,
+        center: Tuple[float, float],
+        step: float,
+        min_step: float,
+        bounds: Tuple[float, float],
+        best_cost: float,
+        results: list[tuple[float, float, float]],
+        count: int,
+        total: int,
+    ) -> Tuple[float, float, float, float, int, bool]:
+        if step < min_step:
+            return center[0], center[1], best_cost, step, count, False
+
+        x, y = center
+        improved = False
+        direction = 1.0
+        for _ in range(2):
+            cand = x + direction * step if axis == "x" else y + direction * step
+            if cand < bounds[0] or cand > bounds[1]:
+                direction *= -1.0
+                continue
+            cx = cand if axis == "x" else x
+            cy = cand if axis == "y" else y
+            cost = self._evaluate_cost(cx, cy)
+            results.append((cx, cy, cost))
+            count += 1
+            self.progress.emit(min(count, total), total)
+            self.log.emit(
+                f"Fast {axis.upper()} x={cx:.3f} y={cy:.3f} cost={cost:.4f}"
+            )
+            if cost < best_cost:
+                best_cost = cost
+                x, y = cx, cy
+                improved = True
+                break
+            direction *= -1.0
+
+        if not improved:
+            step *= 0.5
+            return x, y, best_cost, step, count, False
+
+        # Continue in the improving direction until it stops improving
+        while step >= min_step:
+            cand = x + direction * step if axis == "x" else y + direction * step
+            if cand < bounds[0] or cand > bounds[1]:
+                break
+            cx = cand if axis == "x" else x
+            cy = cand if axis == "y" else y
+            cost = self._evaluate_cost(cx, cy)
+            results.append((cx, cy, cost))
+            count += 1
+            self.progress.emit(min(count, total), total)
+            self.log.emit(
+                f"Fast {axis.upper()} x={cx:.3f} y={cy:.3f} cost={cost:.4f}"
+            )
+            if cost < best_cost:
+                best_cost = cost
+                x, y = cx, cy
+                improved = True
+            else:
+                direction *= -1.0
+                step *= 0.5
+                break
+
+        return x, y, best_cost, step, count, improved
 
     def _evaluate_cost(self, offset_x_mm: float, offset_y_mm: float) -> float:
         prev_time = self._camera.get_last_frame_time()
@@ -1616,6 +1752,10 @@ class DonutOptimizationWindow(QtWidgets.QDialog):
         self.chk_cost_scan = QtWidgets.QCheckBox("Use cost scan (snake)")
         self.chk_cost_scan.setChecked(True)
         scan_layout.addWidget(self.chk_cost_scan, r, 2, 1, 2)
+        r += 1
+        self.chk_fast_search = QtWidgets.QCheckBox("Use fast search")
+        self.chk_fast_search.setChecked(False)
+        scan_layout.addWidget(self.chk_fast_search, r, 2, 1, 2)
 
         layout.addWidget(scan_group)
 
@@ -1897,6 +2037,7 @@ class DonutOptimizationWindow(QtWidgets.QDialog):
             threshold_px=OffsetScanWorker._TARGET_DIST_PX,
             filter_enabled=self.chk_filter.isChecked(),
             filter_threshold=float(self.spin_filter.value()),
+            fast_search=self.chk_fast_search.isChecked(),
         )
 
         self._thread = QtCore.QThread(self)
