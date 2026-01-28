@@ -39,6 +39,8 @@ class ScanSettings:
     filter_enabled: bool
     filter_threshold: float
     fast_search: bool
+    fast_min_step: float
+    fast_multi_pass: bool
     scan_mode: str
 
 
@@ -1797,6 +1799,17 @@ class DonutOptimizationWindow(QtWidgets.QDialog):
         self.chk_fast_search.setChecked(False)
         scan_layout.addWidget(self.chk_fast_search, r, 2, 1, 2)
         r += 1
+        scan_layout.addWidget(QtWidgets.QLabel("Fast min step"), r, 0)
+        self.dsb_fast_min_step = QtWidgets.QDoubleSpinBox()
+        self.dsb_fast_min_step.setRange(0.0001, 5.0)
+        self.dsb_fast_min_step.setDecimals(4)
+        self.dsb_fast_min_step.setValue(0.01)
+        self.dsb_fast_min_step.setSuffix(" mm")
+        scan_layout.addWidget(self.dsb_fast_min_step, r, 1)
+        self.chk_fast_multi = QtWidgets.QCheckBox("Multi-pass fast search")
+        self.chk_fast_multi.setChecked(True)
+        scan_layout.addWidget(self.chk_fast_multi, r, 2, 1, 2)
+        r += 1
         self.rb_scan_shift = QtWidgets.QRadioButton("Shift")
         self.rb_scan_astig = QtWidgets.QRadioButton("Astigmatism")
         self.rb_scan_coma = QtWidgets.QRadioButton("Coma")
@@ -2098,6 +2111,8 @@ class DonutOptimizationWindow(QtWidgets.QDialog):
             filter_enabled=self.chk_filter.isChecked(),
             filter_threshold=float(self.spin_filter.value()),
             fast_search=self.chk_fast_search.isChecked(),
+            fast_min_step=float(self.dsb_fast_min_step.value()),
+            fast_multi_pass=self.chk_fast_multi.isChecked(),
             scan_mode=self._get_scan_mode(),
         )
 
