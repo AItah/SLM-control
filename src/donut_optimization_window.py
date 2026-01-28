@@ -1853,6 +1853,7 @@ class DonutOptimizationWindow(QtWidgets.QDialog):
         self._build_ui()
         self._camera.point_selected.connect(self._on_point_selected)
         self._camera.circle_selected.connect(self._on_circle_selected)
+        self._restore_settings()
 
     def _build_ui(self) -> None:
         layout = QtWidgets.QVBoxLayout(self)
@@ -2042,6 +2043,7 @@ class DonutOptimizationWindow(QtWidgets.QDialog):
         self._manual_radius = None
         self._update_manual_labels()
         self._camera.clear_manual_marks()
+        self._save_settings()
 
     def _on_point_selected(self, point: Tuple[float, float]) -> None:
         self._manual_center = (float(point[0]), float(point[1]))
@@ -2050,6 +2052,7 @@ class DonutOptimizationWindow(QtWidgets.QDialog):
             f"Dark spot set: ({self._manual_center[0]:.1f}, {self._manual_center[1]:.1f})"
         )
         self._refine_dark_spot()
+        self._save_settings()
 
     def _on_circle_selected(self, circle: Tuple[float, float, float]) -> None:
         cx, cy, r = circle
@@ -2059,6 +2062,7 @@ class DonutOptimizationWindow(QtWidgets.QDialog):
         self._append_log(
             f"Donut circle set: radius={r:.1f} px (drawn at ({cx:.1f}, {cy:.1f}))"
         )
+        self._save_settings()
 
     def _update_manual_labels(self) -> None:
         if self._manual_center is None:
@@ -2135,6 +2139,7 @@ class DonutOptimizationWindow(QtWidgets.QDialog):
         self._debug_window.raise_()
         self._debug_window.activateWindow()
         self._append_log("Donut analysis: plotted circle crop.")
+        self._save_settings()
 
     def _refine_dark_spot(self) -> None:
         if not self._camera.is_running():
@@ -2161,6 +2166,7 @@ class DonutOptimizationWindow(QtWidgets.QDialog):
         self._append_log(
             f"Dark spot refined: ({self._manual_center[0]:.1f}, {self._manual_center[1]:.1f})"
         )
+        self._save_settings()
 
     def _apply_filter(self, img: np.ndarray) -> np.ndarray:
         if not self.chk_filter.isChecked():
@@ -2193,6 +2199,7 @@ class DonutOptimizationWindow(QtWidgets.QDialog):
         self._append_log(
             f"Auto donut circle set: radius={radius_px:.1f} px ({radius_mm:.6f} mm)"
         )
+        self._save_settings()
         return True
 
     @staticmethod
@@ -2379,6 +2386,130 @@ class DonutOptimizationWindow(QtWidgets.QDialog):
     def _append_error(self, text: str) -> None:
         self.log.appendPlainText("ERROR: " + text)
 
+    def _restore_settings(self) -> None:
+        settings = QtCore.QSettings()
+        settings.beginGroup("donut_opt_window")
+        geometry = settings.value("geometry")
+        if geometry:
+            self.restoreGeometry(geometry)
+
+        self.dsb_px_um.setValue(float(settings.value("pixel_um", self.dsb_px_um.value())))
+        self.chk_filter.setChecked(bool(settings.value("filter_enabled", False, bool)))
+        self.spin_filter.setValue(int(settings.value("filter_threshold", self.spin_filter.value())))
+        self.dsb_auto_circle_mm.setValue(
+            float(settings.value("auto_circle_radius_mm", self.dsb_auto_circle_mm.value()))
+        )
+
+        self.dsb_x_range.setValue(float(settings.value("x_range_mm", self.dsb_x_range.value())))
+        self.dsb_x_step.setValue(float(settings.value("x_step_mm", self.dsb_x_step.value())))
+        self.dsb_y_range.setValue(float(settings.value("y_range_mm", self.dsb_y_range.value())))
+        self.dsb_y_step.setValue(float(settings.value("y_step_mm", self.dsb_y_step.value())))
+        self.spin_settle.setValue(int(settings.value("settle_ms", self.spin_settle.value())))
+        self.spin_slot.setValue(int(settings.value("slot", self.spin_slot.value())))
+        self.spin_angles.setValue(int(settings.value("angles_count", self.spin_angles.value())))
+        self.chk_cost_scan.setChecked(bool(settings.value("cost_scan", True, bool)))
+        self.chk_fast_search.setChecked(bool(settings.value("fast_search", False, bool)))
+        self.dsb_fast_min_step.setValue(
+            float(settings.value("fast_min_step", self.dsb_fast_min_step.value()))
+        )
+        self.chk_fast_multi.setChecked(bool(settings.value("fast_multi_pass", True, bool)))
+        self.chk_debug.setChecked(bool(settings.value("debug_enabled", False, bool)))
+
+        mode = settings.value("scan_mode", "shift")
+        if mode == "astig":
+            self.rb_scan_astig.setChecked(True)
+        elif mode == "coma":
+            self.rb_scan_coma.setChecked(True)
+        elif mode == "spher":
+            self.rb_scan_spher.setChecked(True)
+        else:
+            self.rb_scan_shift.setChecked(True)
+
+        if settings.contains("manual_center_x") and settings.contains("manual_center_y"):
+            self._manual_center = (
+                float(settings.value("manual_center_x")),
+                float(settings.value("manual_center_y")),
+            )
+        if settings.contains("circle_center_x") and settings.contains("circle_center_y"):
+            self._circle_center = (
+                float(settings.value("circle_center_x")),
+                float(settings.value("circle_center_y")),
+            )
+        if settings.contains("circle_radius_px"):
+            self._manual_radius = float(settings.value("circle_radius_px"))
+
+        self._update_manual_labels()
+        if self._manual_center is not None:
+            self._camera.set_selected_point(self._manual_center, emit=False)
+        if (
+            self._circle_center is not None
+            and self._manual_radius is not None
+            and hasattr(self._camera, "set_selected_circle")
+        ):
+            self._camera.set_selected_circle(
+                self._circle_center, self._manual_radius, emit=False
+            )
+
+        debug_visible = settings.value("debug_visible", False, bool)
+        debug_geometry = settings.value("debug_geometry")
+        settings.endGroup()
+
+        if debug_visible:
+            if self._debug_window is None:
+                self._debug_window = DebugWindow(self)
+            if debug_geometry:
+                self._debug_window.restoreGeometry(debug_geometry)
+            self._debug_window.show()
+            self._debug_window.raise_()
+            self._debug_window.activateWindow()
+
+    def _save_settings(self) -> None:
+        settings = QtCore.QSettings()
+        settings.beginGroup("donut_opt_window")
+        settings.setValue("geometry", self.saveGeometry())
+        settings.setValue("pixel_um", float(self.dsb_px_um.value()))
+        settings.setValue("filter_enabled", self.chk_filter.isChecked())
+        settings.setValue("filter_threshold", int(self.spin_filter.value()))
+        settings.setValue("auto_circle_radius_mm", float(self.dsb_auto_circle_mm.value()))
+        settings.setValue("x_range_mm", float(self.dsb_x_range.value()))
+        settings.setValue("x_step_mm", float(self.dsb_x_step.value()))
+        settings.setValue("y_range_mm", float(self.dsb_y_range.value()))
+        settings.setValue("y_step_mm", float(self.dsb_y_step.value()))
+        settings.setValue("settle_ms", int(self.spin_settle.value()))
+        settings.setValue("slot", int(self.spin_slot.value()))
+        settings.setValue("angles_count", int(self.spin_angles.value()))
+        settings.setValue("cost_scan", self.chk_cost_scan.isChecked())
+        settings.setValue("fast_search", self.chk_fast_search.isChecked())
+        settings.setValue("fast_min_step", float(self.dsb_fast_min_step.value()))
+        settings.setValue("fast_multi_pass", self.chk_fast_multi.isChecked())
+        settings.setValue("debug_enabled", self.chk_debug.isChecked())
+        settings.setValue("scan_mode", self._get_scan_mode())
+        settings.setValue("visible", self.isVisible())
+
+        if self._manual_center is None:
+            settings.remove("manual_center_x")
+            settings.remove("manual_center_y")
+        else:
+            settings.setValue("manual_center_x", float(self._manual_center[0]))
+            settings.setValue("manual_center_y", float(self._manual_center[1]))
+
+        if self._circle_center is None:
+            settings.remove("circle_center_x")
+            settings.remove("circle_center_y")
+        else:
+            settings.setValue("circle_center_x", float(self._circle_center[0]))
+            settings.setValue("circle_center_y", float(self._circle_center[1]))
+
+        if self._manual_radius is None:
+            settings.remove("circle_radius_px")
+        else:
+            settings.setValue("circle_radius_px", float(self._manual_radius))
+
+        if self._debug_window is not None:
+            settings.setValue("debug_visible", self._debug_window.isVisible())
+            settings.setValue("debug_geometry", self._debug_window.saveGeometry())
+        settings.endGroup()
+
     def _get_scan_mode(self) -> str:
         if self.rb_scan_astig.isChecked():
             return "astig"
@@ -2394,6 +2525,7 @@ class DonutOptimizationWindow(QtWidgets.QDialog):
         self._debug_window.show()
         self._debug_window.raise_()
         self._debug_window.activateWindow()
+        self._save_settings()
 
     def _on_debug_data(
         self,
@@ -2417,3 +2549,19 @@ class DonutOptimizationWindow(QtWidgets.QDialog):
         self._camera.set_selected_point(self._manual_center, emit=False)
         if self._manual_radius is not None and hasattr(self._camera, "set_selected_circle"):
             self._camera.set_selected_circle(self._circle_center, self._manual_radius, emit=False)
+
+    def showEvent(self, event: QtGui.QShowEvent) -> None:
+        super().showEvent(event)
+        self._save_settings()
+
+    def hideEvent(self, event: QtGui.QHideEvent) -> None:
+        super().hideEvent(event)
+        self._save_settings()
+
+    def closeEvent(self, event: QtGui.QCloseEvent) -> None:
+        self._save_settings()
+        if QtCore.QCoreApplication.closingDown():
+            event.accept()
+            return
+        event.ignore()
+        self.hide()

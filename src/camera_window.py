@@ -277,6 +277,10 @@ class CameraWindow(QtWidgets.QWidget):
         self.chk_bind.setChecked(bool(settings.value("bind", False, bool)))
         self.spin_hwm.setValue(int(settings.value("rcv_hwm", 2)))
         self.spin_poll.setValue(int(settings.value("poll_ms", 50)))
+        self.chk_filter.setChecked(bool(settings.value("view_filter_enabled", False, bool)))
+        self.spin_filter.setValue(
+            int(settings.value("view_filter_threshold", self.spin_filter.value()))
+        )
         settings.endGroup()
 
     def _save_settings(self) -> None:
@@ -290,6 +294,8 @@ class CameraWindow(QtWidgets.QWidget):
         settings.setValue("bind", self.chk_bind.isChecked())
         settings.setValue("rcv_hwm", int(self.spin_hwm.value()))
         settings.setValue("poll_ms", int(self.spin_poll.value()))
+        settings.setValue("view_filter_enabled", self.chk_filter.isChecked())
+        settings.setValue("view_filter_threshold", int(self.spin_filter.value()))
         settings.setValue("visible", self.isVisible())
         settings.endGroup()
 

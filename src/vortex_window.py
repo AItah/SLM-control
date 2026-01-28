@@ -39,6 +39,7 @@ class VortexWindow(QtWidgets.QWidget):
         self._block_settings = False
         self._force_close = False
         self._donut_window: Optional["DonutOptimizationWindow"] = None
+        self._pending_donut_visible = False
 
         self.setWindowTitle("Vortex Generator")
         self.resize(620, 520)
@@ -51,9 +52,11 @@ class VortexWindow(QtWidgets.QWidget):
 
     def set_slm_control(self, control: "SlmControlWindow") -> None:
         self._slm_control = control
+        self._maybe_restore_donut_window()
 
     def set_camera_window(self, camera_window) -> None:
         self._camera_window = camera_window
+        self._maybe_restore_donut_window()
 
     def _build_ui(self) -> None:
         layout = QtWidgets.QVBoxLayout(self)
@@ -571,6 +574,10 @@ class VortexWindow(QtWidgets.QWidget):
         self.dsb_coma_x.setValue(float(settings.value("coma_x", 0.0)))
         self.dsb_spher.setValue(float(settings.value("spher", 0.0)))
         settings.endGroup()
+        settings.beginGroup("donut_opt_window")
+        self._pending_donut_visible = bool(settings.value("visible", False, bool))
+        settings.endGroup()
+        self._maybe_restore_donut_window()
 
     def _save_settings(self) -> None:
         settings = QtCore.QSettings()
@@ -599,6 +606,14 @@ class VortexWindow(QtWidgets.QWidget):
         settings.setValue("spher", float(self.dsb_spher.value()))
         settings.setValue("visible", self.isVisible())
         settings.endGroup()
+
+    def _maybe_restore_donut_window(self) -> None:
+        if not self._pending_donut_visible:
+            return
+        if self._slm_control is None or self._camera_window is None:
+            return
+        self._pending_donut_visible = False
+        self._open_donut_opt()
 
     def showEvent(self, event: QtGui.QShowEvent) -> None:
         super().showEvent(event)
