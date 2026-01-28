@@ -1944,6 +1944,9 @@ class DonutOptimizationWindow(QtWidgets.QDialog):
         self._thread: Optional[QtCore.QThread] = None
         self._worker: Optional[OffsetScanWorker] = None
         self._debug_window: Optional[DebugWindow] = None
+        self._scan_queue: list[str] = []
+        self._active_scan_mode: Optional[str] = None
+        self._scan_total: int = 0
         # User hints (not assumed exact)
         self._manual_center: Optional[Tuple[float, float]] = None  # "dark spot" hint
         self._circle_center: Optional[Tuple[float, float]] = None  # circle center hint
@@ -2077,29 +2080,21 @@ class DonutOptimizationWindow(QtWidgets.QDialog):
         self.dsb_fast_shrink.setToolTip("Step size is divided by this factor each reduction.")
         scan_layout.addWidget(self.dsb_fast_shrink, r, 3)
         r += 1
-        self.rb_scan_shift = QtWidgets.QRadioButton("Shift")
-        self.rb_scan_astig = QtWidgets.QRadioButton("Astigmatism")
-        self.rb_scan_coma = QtWidgets.QRadioButton("Coma")
-        self.rb_scan_spher = QtWidgets.QRadioButton("Spherical")
-        self.rb_scan_shift.setToolTip("Optimize X/Y shift offsets.")
-        self.rb_scan_astig.setToolTip("Optimize astigmatism coefficients.")
-        self.rb_scan_coma.setToolTip("Optimize coma coefficients.")
-        self.rb_scan_spher.setToolTip("Optimize spherical coefficient.")
-        self.rb_scan_shift.setChecked(True)
-        self.scan_group = QtWidgets.QButtonGroup(self)
-        for rb in (
-            self.rb_scan_shift,
-            self.rb_scan_astig,
-            self.rb_scan_coma,
-            self.rb_scan_spher,
-        ):
-            self.scan_group.addButton(rb)
-        scan_layout.addWidget(QtWidgets.QLabel("Scan mode"), r, 0)
-        scan_layout.addWidget(self.rb_scan_shift, r, 1)
-        scan_layout.addWidget(self.rb_scan_astig, r, 2)
-        scan_layout.addWidget(self.rb_scan_coma, r, 3)
+        self.chk_scan_shift = QtWidgets.QCheckBox("Shift")
+        self.chk_scan_astig = QtWidgets.QCheckBox("Astigmatism")
+        self.chk_scan_coma = QtWidgets.QCheckBox("Coma")
+        self.chk_scan_spher = QtWidgets.QCheckBox("Spherical")
+        self.chk_scan_shift.setToolTip("Optimize X/Y shift offsets.")
+        self.chk_scan_astig.setToolTip("Optimize astigmatism coefficients.")
+        self.chk_scan_coma.setToolTip("Optimize coma coefficients.")
+        self.chk_scan_spher.setToolTip("Optimize spherical coefficient.")
+        self.chk_scan_shift.setChecked(True)
+        scan_layout.addWidget(QtWidgets.QLabel("Scan modes"), r, 0)
+        scan_layout.addWidget(self.chk_scan_shift, r, 1)
+        scan_layout.addWidget(self.chk_scan_astig, r, 2)
+        scan_layout.addWidget(self.chk_scan_coma, r, 3)
         r += 1
-        scan_layout.addWidget(self.rb_scan_spher, r, 1)
+        scan_layout.addWidget(self.chk_scan_spher, r, 1)
 
         layout.addWidget(scan_group)
 
@@ -2399,30 +2394,36 @@ class DonutOptimizationWindow(QtWidgets.QDialog):
             return
         if self._thread is not None:
             return
+        modes = self._selected_scan_modes()
+        if not modes:
+            self._append_error("Please select at least one scan mode.")
+            return
 
-        settings = ScanSettings(
-            x_range_mm=float(self.dsb_x_range.value()),
-            x_step_mm=float(self.dsb_x_step.value()),
-            y_range_mm=float(self.dsb_y_range.value()),
-            y_step_mm=float(self.dsb_y_step.value()),
-            settle_ms=int(self.spin_settle.value()),
-            slot=int(self.spin_slot.value()),
-            debug_enabled=self.chk_debug.isChecked(),
-            angles_count=int(self.spin_angles.value()),
-            circle_center=(float(self._circle_center[0]), float(self._circle_center[1])),
-            circle_radius=float(self._manual_radius),
-            dark_hint=(float(self._manual_center[0]), float(self._manual_center[1])),
-            pixel_size_mm=float(self.dsb_px_um.value()) * 1e-3,
-            threshold_px=OffsetScanWorker._TARGET_DIST_PX,
-            filter_enabled=self.chk_filter.isChecked(),
-            filter_threshold=float(self.spin_filter.value()),
-            fast_search=True,
-            fast_min_step=float(self.dsb_fast_min_step.value()),
-            fast_shrink_factor=float(self.dsb_fast_shrink.value()),
-            fast_multi_pass=True,
-            scan_mode=self._get_scan_mode(),
-        )
+        if len(modes) > 1:
+            if "shift" in modes:
+                self._vortex.set_offsets_mm(0.0, 0.0)
+                self._vortex.set_zernike_values(
+                    astig_v=0.0, astig_o=0.0, coma_x=0.0, coma_y=0.0, spher=0.0
+                )
+            else:
+                self._vortex.set_zernike_values(
+                    astig_v=0.0, astig_o=0.0, coma_x=0.0, coma_y=0.0, spher=0.0
+                )
+            self._apply_current_mask_to_slm()
 
+        self._scan_queue = list(modes)
+        self._scan_total = len(self._scan_queue)
+        self._start_next_scan()
+
+    def _start_next_scan(self) -> None:
+        if not self._scan_queue:
+            return
+        mode = self._scan_queue.pop(0)
+        self._active_scan_mode = mode
+        idx = (self._scan_total - len(self._scan_queue))
+        self._append_log(f"Starting {mode} scan ({idx}/{self._scan_total})...")
+
+        settings = self._build_scan_settings(mode)
         self._thread = QtCore.QThread(self)
         self._worker = CostScanWorker(self._vortex, self._slm, self._camera, settings)
         self._worker.moveToThread(self._thread)
@@ -2437,7 +2438,7 @@ class DonutOptimizationWindow(QtWidgets.QDialog):
         self.btn_start.setEnabled(False)
         self.btn_stop.setEnabled(True)
 
-    def _stop(self) -> None:
+    def _stop(self, clear_queue: bool = True, reenable: bool = True) -> None:
         if self._worker:
             self._worker.stop()
         if self._thread:
@@ -2445,8 +2446,13 @@ class DonutOptimizationWindow(QtWidgets.QDialog):
             self._thread.wait(1000)
         self._thread = None
         self._worker = None
-        self.btn_start.setEnabled(True)
-        self.btn_stop.setEnabled(False)
+        if clear_queue:
+            self._scan_queue = []
+            self._scan_total = 0
+            self._active_scan_mode = None
+        if reenable:
+            self.btn_start.setEnabled(True)
+            self.btn_stop.setEnabled(False)
 
     def _on_progress(self, current: int, total: int) -> None:
         if total > 0:
@@ -2458,7 +2464,7 @@ class DonutOptimizationWindow(QtWidgets.QDialog):
         self._stop()
 
     def _on_scan_finished(self, best_x: float, best_y: float, csv_path: str) -> None:
-        mode = self._get_scan_mode()
+        mode = self._active_scan_mode or "shift"
         if mode == "shift":
             msg = f"Scan complete. Best X={best_x:.3f} mm, Y={best_y:.3f} mm"
         elif mode == "astig":
@@ -2477,6 +2483,11 @@ class DonutOptimizationWindow(QtWidgets.QDialog):
             self._vortex.set_zernike_values(coma_x=best_x, coma_y=best_y)
         else:
             self._vortex.set_zernike_values(spher=best_x)
+
+        if self._scan_queue:
+            self._stop(clear_queue=False, reenable=False)
+            self._start_next_scan()
+            return
         self._stop()
 
     def _on_failed(self, msg: str) -> None:
@@ -2518,15 +2529,12 @@ class DonutOptimizationWindow(QtWidgets.QDialog):
         )
         self.chk_debug.setChecked(bool(settings.value("debug_enabled", False, bool)))
 
-        mode = settings.value("scan_mode", "shift")
-        if mode == "astig":
-            self.rb_scan_astig.setChecked(True)
-        elif mode == "coma":
-            self.rb_scan_coma.setChecked(True)
-        elif mode == "spher":
-            self.rb_scan_spher.setChecked(True)
-        else:
-            self.rb_scan_shift.setChecked(True)
+        self.chk_scan_shift.setChecked(bool(settings.value("scan_shift", True, bool)))
+        self.chk_scan_astig.setChecked(bool(settings.value("scan_astig", False, bool)))
+        self.chk_scan_coma.setChecked(bool(settings.value("scan_coma", False, bool)))
+        self.chk_scan_spher.setChecked(bool(settings.value("scan_spher", False, bool)))
+        if not self._selected_scan_modes():
+            self.chk_scan_shift.setChecked(True)
 
         if settings.contains("manual_center_x") and settings.contains("manual_center_y"):
             self._manual_center = (
@@ -2584,7 +2592,10 @@ class DonutOptimizationWindow(QtWidgets.QDialog):
         settings.setValue("fast_min_step", float(self.dsb_fast_min_step.value()))
         settings.setValue("fast_shrink", float(self.dsb_fast_shrink.value()))
         settings.setValue("debug_enabled", self.chk_debug.isChecked())
-        settings.setValue("scan_mode", self._get_scan_mode())
+        settings.setValue("scan_shift", self.chk_scan_shift.isChecked())
+        settings.setValue("scan_astig", self.chk_scan_astig.isChecked())
+        settings.setValue("scan_coma", self.chk_scan_coma.isChecked())
+        settings.setValue("scan_spher", self.chk_scan_spher.isChecked())
         settings.setValue("visible", self.isVisible())
 
         if self._manual_center is None:
@@ -2611,14 +2622,52 @@ class DonutOptimizationWindow(QtWidgets.QDialog):
             settings.setValue("debug_geometry", self._debug_window.saveGeometry())
         settings.endGroup()
 
-    def _get_scan_mode(self) -> str:
-        if self.rb_scan_astig.isChecked():
-            return "astig"
-        if self.rb_scan_coma.isChecked():
-            return "coma"
-        if self.rb_scan_spher.isChecked():
-            return "spher"
-        return "shift"
+    def _selected_scan_modes(self) -> list[str]:
+        modes: list[str] = []
+        if self.chk_scan_shift.isChecked():
+            modes.append("shift")
+        if self.chk_scan_astig.isChecked():
+            modes.append("astig")
+        if self.chk_scan_coma.isChecked():
+            modes.append("coma")
+        if self.chk_scan_spher.isChecked():
+            modes.append("spher")
+        return modes
+
+    def _build_scan_settings(self, mode: str) -> ScanSettings:
+        return ScanSettings(
+            x_range_mm=float(self.dsb_x_range.value()),
+            x_step_mm=float(self.dsb_x_step.value()),
+            y_range_mm=float(self.dsb_y_range.value()),
+            y_step_mm=float(self.dsb_y_step.value()),
+            settle_ms=int(self.spin_settle.value()),
+            slot=int(self.spin_slot.value()),
+            debug_enabled=self.chk_debug.isChecked(),
+            angles_count=int(self.spin_angles.value()),
+            circle_center=(float(self._circle_center[0]), float(self._circle_center[1])),
+            circle_radius=float(self._manual_radius),
+            dark_hint=(float(self._manual_center[0]), float(self._manual_center[1])),
+            pixel_size_mm=float(self.dsb_px_um.value()) * 1e-3,
+            threshold_px=OffsetScanWorker._TARGET_DIST_PX,
+            filter_enabled=self.chk_filter.isChecked(),
+            filter_threshold=float(self.spin_filter.value()),
+            fast_search=True,
+            fast_min_step=float(self.dsb_fast_min_step.value()),
+            fast_shrink_factor=float(self.dsb_fast_shrink.value()),
+            fast_multi_pass=True,
+            scan_mode=mode,
+        )
+
+    def _apply_current_mask_to_slm(self) -> None:
+        try:
+            mask_u8 = self._vortex.build_mask_with_params()
+            ok = self._slm.send_mask_to_slot(mask_u8, int(self.spin_slot.value()))
+            if not ok:
+                self._append_error("Failed to send mask to SLM.")
+            else:
+                self._append_log("SLM updated with reset parameters.")
+        except Exception as exc:
+            self._append_error(str(exc))
 
     def _open_debug(self) -> None:
         if self._debug_window is None:
