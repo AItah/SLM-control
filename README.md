@@ -1,5 +1,13 @@
 # SLM-control
 
+## Documentation
+- Full user manual: `Docs/Manual.md`
+- Search algorithm: `Docs/Search_Algorithm.md`
+- Vortex mask overview: `Docs/Vortex_Mask.md`
+- Vortex mask generation: `Docs/Vortex_Mask_Generation.md`
+- Zernike physics: `Docs/Zernike_Physics.md`
+- Recommended format for web-based docs: Markdown source + static site generator (e.g., MkDocs) so it can be viewed locally or hosted.
+
 ## installation
 - install packages
 1. run prepare_requirements_for_pip.py
