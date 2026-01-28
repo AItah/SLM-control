@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from pathlib import Path
 from typing import Optional, TYPE_CHECKING
 
@@ -101,6 +102,13 @@ class VortexWindow(QtWidgets.QWidget):
         self.chk_force_zero.setChecked(True)
         self.chk_force_zero.setToolTip("Force the vortex center to land on an integer pixel.")
 
+        self.dsb_rotation_deg = QtWidgets.QDoubleSpinBox()
+        self.dsb_rotation_deg.setRange(-360.0, 360.0)
+        self.dsb_rotation_deg.setDecimals(2)
+        self.dsb_rotation_deg.setSuffix(" deg")
+        self.dsb_rotation_deg.setValue(0.0)
+        self.dsb_rotation_deg.setToolTip("Rotate the vortex phase (degrees).")
+
         vortex_layout.addWidget(QtWidgets.QLabel("Wavelength:"), r, 0)
         vortex_layout.addWidget(self.dsb_wavelength_nm, r, 1)
         vortex_layout.addWidget(QtWidgets.QLabel("ell:"), r, 2)
@@ -116,6 +124,9 @@ class VortexWindow(QtWidgets.QWidget):
         vortex_layout.addWidget(QtWidgets.QLabel("Aperture radius:"), r, 0)
         vortex_layout.addWidget(self.dsb_aperture_mm, r, 1)
         vortex_layout.addWidget(self.chk_force_zero, r, 2, 1, 2)
+        r += 1
+        vortex_layout.addWidget(QtWidgets.QLabel("Rotation:"), r, 0)
+        vortex_layout.addWidget(self.dsb_rotation_deg, r, 1)
 
         layout.addWidget(vortex_group)
 
@@ -401,6 +412,7 @@ class VortexWindow(QtWidgets.QWidget):
         self,
         offset_x_mm: Optional[float] = None,
         offset_y_mm: Optional[float] = None,
+        rotation_deg: Optional[float] = None,
         c_astig_v: Optional[float] = None,
         c_astig_o: Optional[float] = None,
         c_coma_y: Optional[float] = None,
@@ -410,6 +422,7 @@ class VortexWindow(QtWidgets.QWidget):
         result, _ = self._build_mask_from_ui(
             offset_x_mm=offset_x_mm,
             offset_y_mm=offset_y_mm,
+            rotation_deg=rotation_deg,
             c_astig_v=c_astig_v,
             c_astig_o=c_astig_o,
             c_coma_y=c_coma_y,
@@ -422,6 +435,7 @@ class VortexWindow(QtWidgets.QWidget):
         self,
         offset_x_mm: Optional[float] = None,
         offset_y_mm: Optional[float] = None,
+        rotation_deg: Optional[float] = None,
         c_astig_v: Optional[float] = None,
         c_astig_o: Optional[float] = None,
         c_coma_y: Optional[float] = None,
@@ -448,6 +462,12 @@ class VortexWindow(QtWidgets.QWidget):
         )
         sft_x_m = off_x * 1e-3
         sft_y_m = off_y * 1e-3
+        rotation_deg = (
+            float(self.dsb_rotation_deg.value())
+            if rotation_deg is None
+            else float(rotation_deg)
+        )
+        rotation_rad = math.radians(rotation_deg)
 
         aperture_radius_m = None
         aperture_mm = float(self.dsb_aperture_mm.value())
@@ -483,6 +503,7 @@ class VortexWindow(QtWidgets.QWidget):
             ell=ell,
             sft_x_m=sft_x_m,
             sft_y_m=sft_y_m,
+            rotation_rad=rotation_rad,
             zernike_offset_x_m=sft_x_m,
             zernike_offset_y_m=sft_y_m,
             c_astig_v=float(self.dsb_astig_v.value())
@@ -564,6 +585,7 @@ class VortexWindow(QtWidgets.QWidget):
         self.dsb_offset_x_mm.setValue(float(settings.value("offset_x_mm", 0.0)))
         self.dsb_offset_y_mm.setValue(float(settings.value("offset_y_mm", 0.0)))
         self.dsb_aperture_mm.setValue(float(settings.value("aperture_mm", 0.0)))
+        self.dsb_rotation_deg.setValue(float(settings.value("rotation_deg", 0.0)))
         self.chk_force_zero.setChecked(bool(settings.value("force_zero", True, bool)))
         self.chk_use_fork.setChecked(bool(settings.value("use_fork", True, bool)))
         self.cmb_steer_mode.setCurrentText(settings.value("steer_mode", "shift"))
@@ -595,6 +617,7 @@ class VortexWindow(QtWidgets.QWidget):
         settings.setValue("offset_x_mm", float(self.dsb_offset_x_mm.value()))
         settings.setValue("offset_y_mm", float(self.dsb_offset_y_mm.value()))
         settings.setValue("aperture_mm", float(self.dsb_aperture_mm.value()))
+        settings.setValue("rotation_deg", float(self.dsb_rotation_deg.value()))
         settings.setValue("force_zero", self.chk_force_zero.isChecked())
         settings.setValue("use_fork", self.chk_use_fork.isChecked())
         settings.setValue("steer_mode", self.cmb_steer_mode.currentText())

@@ -1061,6 +1061,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 ell=ell,
                 sft_x=sft_x,
                 sft_y=sft_y,
+                rotation_rad=0.0,
                 steer_req=steer_req,
                 use_forked=use_forked,
                 aperture_radius_m=aperture_radius_m,

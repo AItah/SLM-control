@@ -124,15 +124,26 @@ def make_coordinates(
         y_norm=y_norm,
     )
 
-
 def make_vortex_phase(
-    coords: Coordinates, ell: int, sft_x: float = 0.0, sft_y: float = 0.0
+    coords: Coordinates, 
+    ell: int, 
+    sft_x: float = 0.0, 
+    sft_y: float = 0.0,
+    rotation: float = 0.0,
+    alpha: float = 1.0,  # X-axis scaling
+    beta: float = 1.0    # Y-axis scaling
 ) -> np.ndarray:
     if not isinstance(ell, int) or ell < 1:
         raise ValueError("ell must be a positive integer.")
-    theta = np.arctan2(coords.Y - sft_y, coords.X - sft_x)
+    
+    # Scale coordinates to compensate for elliptical beam shape
+    dy = beta * (coords.Y - sft_y)
+    dx = alpha * (coords.X - sft_x)
+    
+    # Calculate azimuthal angle with rotation
+    theta = np.arctan2(dy, dx) - rotation
+    
     return ell * theta
-
 
 def make_zernike_phase(
     coords: Coordinates,
@@ -247,6 +258,9 @@ def generate_mask(
     ell: int,
     sft_x_m: float = 0.0,
     sft_y_m: float = 0.0,
+    rotation_rad: float = 0.0,
+    alpha: float = 1.0,
+    beta: float = 1.0,
     zernike_offset_x_m: float = 0.0,
     zernike_offset_y_m: float = 0.0,
     c_astig_v: float = 0.0,
@@ -265,7 +279,15 @@ def generate_mask(
         slm, force_zero=force_zero, aperture_radius_m=aperture_radius_m
     )
 
-    vortex = make_vortex_phase(coords, ell, sft_x=sft_x_m, sft_y=sft_y_m)
+    vortex = make_vortex_phase(
+        coords,
+        ell,
+        sft_x=sft_x_m,
+        sft_y=sft_y_m,
+        rotation=rotation_rad,
+        alpha=alpha,
+        beta=beta,
+    )
     if aperture_radius_m is not None:
         vortex = vortex * make_circular_aperture(
             coords, aperture_radius_m, sft_x_m=sft_x_m, sft_y_m=sft_y_m
