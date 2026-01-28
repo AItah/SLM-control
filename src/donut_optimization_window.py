@@ -781,94 +781,108 @@ class CostScanWorker(QtCore.QObject):
 
     def _run_fast_search(self) -> Tuple[float, float, str]:
         xs, ys, labels, base = self._scan_grid()
-        center_x = xs[len(xs) // 2] if xs else 0.0
-        center_y = ys[len(ys) // 2] if ys else 0.0
-        bound_x_lo = min(xs) if xs else center_x
-        bound_x_hi = max(xs) if xs else center_x
-        bound_y_lo = min(ys) if ys else center_y
-        bound_y_hi = max(ys) if ys else center_y
+        best_x = xs[len(xs) // 2] if xs else 0.0
+        best_y = ys[len(ys) // 2] if ys else 0.0
+        mode = self._settings.scan_mode
 
-        step_x = float(self._settings.x_step_mm)
-        step_y = float(self._settings.y_step_mm)
+        step_x0 = float(self._settings.x_step_mm)
+        step_y0 = float(self._settings.y_step_mm)
+        if mode == "spher":
+            step_y0 = 0.0
         min_step_user = max(float(self._settings.fast_min_step), 1e-6)
-        min_step_x = min(step_x, min_step_user)
-        min_step_y = min(step_y, min_step_user)
+        max_step = max(step_x0, step_y0, 1e-9)
+        min_scale = min(1.0, min_step_user / max_step)
 
         results: list[tuple[float, float, float, float, float]] = []
-        best_x, best_y = center_x, center_y
         best_cost = self._evaluate_cost(best_x, best_y, base)
-        results.append((best_x, best_y, best_cost, step_x, step_y))
+        results.append((best_x, best_y, best_cost, step_x0, step_y0))
         self.log.emit(
             f"Fast search start {labels[0]}={best_x:.3f} {labels[1]}={best_y:.3f} cost={best_cost:.4f}"
         )
         self.log.emit(
             "Fast search steps "
-            f"step_x={step_x:.4f} step_y={step_y:.4f} "
-            f"min_step={min_step_user:.4f} "
-            f"x_range={self._settings.x_range_mm:.4f} y_range={self._settings.y_range_mm:.4f}"
+            f"step_x={step_x0:.4f} step_y={step_y0:.4f} "
+            f"min_step={min_step_user:.4f}"
         )
 
-        progress_est = max(
-            4,
-            int(
-                (self._settings.x_range_mm / max(min_step_x, 1e-6))
-                + (self._settings.y_range_mm / max(min_step_y, 1e-6))
-            ),
-        )
+        directions_count = max(1, int(self._settings.angles_count))
+        progress_est = max(1, directions_count * 10)
         count = 1
 
-        if self._settings.fast_multi_pass:
-            pass_idx = 0
-            pass_step_x = step_x
-            pass_step_y = step_y
-            while True:
+        scale = 1.0
+        while scale >= min_scale:
+            if not self._running:
+                raise RuntimeError("Scan canceled.")
+            step_x = step_x0 * scale
+            step_y = step_y0 * scale
+
+            cx, cy = self._circle_center
+            dx0 = self._current_dark[0] - cx
+            dy0 = self._current_dark[1] - cy
+            base_angle = math.atan2(dy0, dx0) if (dx0 != 0.0 or dy0 != 0.0) else 0.0
+
+            if mode == "spher":
+                angles = [0.0, math.pi]
+            else:
+                angles = [
+                    base_angle + (2.0 * math.pi * i / directions_count)
+                    for i in range(directions_count)
+                ]
+
+            improved = False
+            for angle in angles:
                 if not self._running:
                     raise RuntimeError("Scan canceled.")
-                pass_idx += 1
-                pass_min_x = max(min_step_x, pass_step_x * 0.5)
-                pass_min_y = max(min_step_y, pass_step_y * 0.5)
+                dir_x = math.cos(angle)
+                dir_y = math.sin(angle)
+                cand_x = best_x + dir_x * step_x
+                cand_y = best_y + dir_y * step_y
+                cost = self._evaluate_cost(cand_x, cand_y, base)
+                results.append((cand_x, cand_y, cost, step_x, step_y))
+                count += 1
+                self.progress.emit(min(count, progress_est), progress_est)
                 self.log.emit(
-                    "Fast pass "
-                    f"{pass_idx} step_x={pass_step_x:.4f} step_y={pass_step_y:.4f} "
-                    f"min_x={pass_min_x:.4f} min_y={pass_min_y:.4f}"
+                    f"Fast dir={math.degrees(angle):.1f} "
+                    f"x={cand_x:.3f} y={cand_y:.3f} cost={cost:.4f} "
+                    f"step_x={step_x:.4f} step_y={step_y:.4f}"
                 )
+                if cost < best_cost:
+                    best_cost = cost
+                    best_x, best_y = cand_x, cand_y
+                    improved = True
 
-                best_x, best_y, best_cost, step_x, step_y, count = self._fast_search_attempt(
-                    center=(best_x, best_y),
-                    step_x=pass_step_x,
-                    step_y=pass_step_y,
-                    min_step_x=pass_min_x,
-                    min_step_y=pass_min_y,
-                    bounds_x=(bound_x_lo, bound_x_hi),
-                    bounds_y=(bound_y_lo, bound_y_hi),
-                    best_cost=best_cost,
-                    results=results,
-                    count=count,
-                    total=progress_est,
-                    base=base,
-                )
+                    # Keep moving in the same direction while improving
+                    while True:
+                        if not self._running:
+                            raise RuntimeError("Scan canceled.")
+                        cand_x = best_x + dir_x * step_x
+                        cand_y = best_y + dir_y * step_y
+                        cost = self._evaluate_cost(cand_x, cand_y, base)
+                        results.append((cand_x, cand_y, cost, step_x, step_y))
+                        count += 1
+                        self.progress.emit(min(count, progress_est), progress_est)
+                        self.log.emit(
+                            f"Fast dir={math.degrees(angle):.1f} "
+                            f"x={cand_x:.3f} y={cand_y:.3f} cost={cost:.4f} "
+                            f"step_x={step_x:.4f} step_y={step_y:.4f}"
+                        )
+                        if cost < best_cost:
+                            best_cost = cost
+                            best_x, best_y = cand_x, cand_y
+                            improved = True
+                            continue
+                        break
 
-                pass_step_x = max(min_step_x, step_x)
-                pass_step_y = max(min_step_y, step_y)
-
-                if pass_step_x <= min_step_x and pass_step_y <= min_step_y:
                     break
-                if pass_step_x == pass_min_x and pass_step_y == pass_min_y:
-                    break
-        else:
-            best_x, best_y, best_cost, step_x, step_y, count = self._fast_search_attempt(
-                center=(best_x, best_y),
-                step_x=step_x,
-                step_y=step_y,
-                min_step_x=min_step_x,
-                min_step_y=min_step_y,
-                bounds_x=(bound_x_lo, bound_x_hi),
-                bounds_y=(bound_y_lo, bound_y_hi),
-                best_cost=best_cost,
-                results=results,
-                count=count,
-                total=progress_est,
-                base=base,
+
+            if improved:
+                continue
+            scale *= 0.5
+            if scale < min_scale:
+                break
+            self.log.emit(
+                f"Fast search reduce step scale={scale:.4f} "
+                f"step_x={step_x0 * scale:.4f} step_y={step_y0 * scale:.4f}"
             )
 
         csv_path = self._write_csv(results, labels)
