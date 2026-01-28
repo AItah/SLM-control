@@ -2055,11 +2055,6 @@ class DonutOptimizationWindow(QtWidgets.QDialog):
         self.spin_angles.setValue(10)
         scan_layout.addWidget(QtWidgets.QLabel("Angles"), r, 0)
         scan_layout.addWidget(self.spin_angles, r, 1)
-        self.chk_fast_search = QtWidgets.QCheckBox("Use fast search")
-        self.chk_fast_search.setChecked(True)
-        self.chk_fast_search.setToolTip("Use directional fast search.")
-        scan_layout.addWidget(self.chk_fast_search, r, 2, 1, 2)
-        r += 1
         scan_layout.addWidget(QtWidgets.QLabel("Fast min step"), r, 0)
         self.dsb_fast_min_step = QtWidgets.QDoubleSpinBox()
         self.dsb_fast_min_step.setRange(0.0001, 5.0)
@@ -2411,7 +2406,7 @@ class DonutOptimizationWindow(QtWidgets.QDialog):
             threshold_px=OffsetScanWorker._TARGET_DIST_PX,
             filter_enabled=self.chk_filter.isChecked(),
             filter_threshold=float(self.spin_filter.value()),
-            fast_search=self.chk_fast_search.isChecked(),
+            fast_search=True,
             fast_min_step=float(self.dsb_fast_min_step.value()),
             fast_multi_pass=self.chk_fast_multi.isChecked(),
             scan_mode=self._get_scan_mode(),
@@ -2504,7 +2499,6 @@ class DonutOptimizationWindow(QtWidgets.QDialog):
         self.spin_settle.setValue(int(settings.value("settle_ms", self.spin_settle.value())))
         self.spin_slot.setValue(int(settings.value("slot", self.spin_slot.value())))
         self.spin_angles.setValue(int(settings.value("angles_count", self.spin_angles.value())))
-        self.chk_fast_search.setChecked(bool(settings.value("fast_search", True, bool)))
         self.dsb_fast_min_step.setValue(
             float(settings.value("fast_min_step", self.dsb_fast_min_step.value()))
         )
@@ -2574,7 +2568,6 @@ class DonutOptimizationWindow(QtWidgets.QDialog):
         settings.setValue("settle_ms", int(self.spin_settle.value()))
         settings.setValue("slot", int(self.spin_slot.value()))
         settings.setValue("angles_count", int(self.spin_angles.value()))
-        settings.setValue("fast_search", self.chk_fast_search.isChecked())
         settings.setValue("fast_min_step", float(self.dsb_fast_min_step.value()))
         settings.setValue("fast_multi_pass", self.chk_fast_multi.isChecked())
         settings.setValue("debug_enabled", self.chk_debug.isChecked())
