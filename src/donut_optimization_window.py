@@ -41,6 +41,7 @@ class ScanSettings:
     fast_search: bool
     fast_min_step: float
     fast_multi_pass: bool
+    fast_shrink_factor: float
     scan_mode: str
 
 
@@ -788,6 +789,7 @@ class CostScanWorker(QtCore.QObject):
         if mode == "spher":
             step_y0 = 0.0
         min_step_user = max(float(self._settings.fast_min_step), 1e-6)
+        shrink_factor = max(2.0, float(self._settings.fast_shrink_factor))
         max_step = max(step_x0, step_y0, 1e-9)
         min_scale = min(1.0, min_step_user / max_step)
 
@@ -800,7 +802,7 @@ class CostScanWorker(QtCore.QObject):
         self.log.emit(
             "Fast search steps "
             f"step_x={step_x0:.4f} step_y={step_y0:.4f} "
-            f"min_step={min_step_user:.4f}"
+            f"min_step={min_step_user:.4f} shrink={shrink_factor:.2f}"
         )
         if mode == "spher":
             self.log.emit("Cost metric: (max - noise) / (dark - noise) from crop + dark spot.")
@@ -879,7 +881,7 @@ class CostScanWorker(QtCore.QObject):
 
             if improved:
                 continue
-            scale *= 0.5
+            scale /= shrink_factor
             if scale < min_scale:
                 break
             self.log.emit(
@@ -2055,6 +2057,7 @@ class DonutOptimizationWindow(QtWidgets.QDialog):
         self.spin_angles.setValue(10)
         scan_layout.addWidget(QtWidgets.QLabel("Angles"), r, 0)
         scan_layout.addWidget(self.spin_angles, r, 1)
+        r += 1
         scan_layout.addWidget(QtWidgets.QLabel("Fast min step"), r, 0)
         self.dsb_fast_min_step = QtWidgets.QDoubleSpinBox()
         self.dsb_fast_min_step.setRange(0.0001, 5.0)
@@ -2062,10 +2065,13 @@ class DonutOptimizationWindow(QtWidgets.QDialog):
         self.dsb_fast_min_step.setValue(0.01)
         self.dsb_fast_min_step.setSuffix(" mm")
         scan_layout.addWidget(self.dsb_fast_min_step, r, 1)
-        self.chk_fast_multi = QtWidgets.QCheckBox("Multi-pass fast search")
-        self.chk_fast_multi.setChecked(True)
-        self.chk_fast_multi.setToolTip("Run multiple passes with shrinking step size.")
-        scan_layout.addWidget(self.chk_fast_multi, r, 2, 1, 2)
+        scan_layout.addWidget(QtWidgets.QLabel("Shrink factor"), r, 2)
+        self.dsb_fast_shrink = QtWidgets.QDoubleSpinBox()
+        self.dsb_fast_shrink.setRange(2.0, 10.0)
+        self.dsb_fast_shrink.setDecimals(2)
+        self.dsb_fast_shrink.setValue(2.0)
+        self.dsb_fast_shrink.setToolTip("Step size is divided by this factor each reduction.")
+        scan_layout.addWidget(self.dsb_fast_shrink, r, 3)
         r += 1
         self.rb_scan_shift = QtWidgets.QRadioButton("Shift")
         self.rb_scan_astig = QtWidgets.QRadioButton("Astigmatism")
@@ -2408,7 +2414,8 @@ class DonutOptimizationWindow(QtWidgets.QDialog):
             filter_threshold=float(self.spin_filter.value()),
             fast_search=True,
             fast_min_step=float(self.dsb_fast_min_step.value()),
-            fast_multi_pass=self.chk_fast_multi.isChecked(),
+            fast_shrink_factor=float(self.dsb_fast_shrink.value()),
+            fast_multi_pass=True,
             scan_mode=self._get_scan_mode(),
         )
 
@@ -2502,7 +2509,9 @@ class DonutOptimizationWindow(QtWidgets.QDialog):
         self.dsb_fast_min_step.setValue(
             float(settings.value("fast_min_step", self.dsb_fast_min_step.value()))
         )
-        self.chk_fast_multi.setChecked(bool(settings.value("fast_multi_pass", True, bool)))
+        self.dsb_fast_shrink.setValue(
+            float(settings.value("fast_shrink", self.dsb_fast_shrink.value()))
+        )
         self.chk_debug.setChecked(bool(settings.value("debug_enabled", False, bool)))
 
         mode = settings.value("scan_mode", "shift")
@@ -2569,7 +2578,7 @@ class DonutOptimizationWindow(QtWidgets.QDialog):
         settings.setValue("slot", int(self.spin_slot.value()))
         settings.setValue("angles_count", int(self.spin_angles.value()))
         settings.setValue("fast_min_step", float(self.dsb_fast_min_step.value()))
-        settings.setValue("fast_multi_pass", self.chk_fast_multi.isChecked())
+        settings.setValue("fast_shrink", float(self.dsb_fast_shrink.value()))
         settings.setValue("debug_enabled", self.chk_debug.isChecked())
         settings.setValue("scan_mode", self._get_scan_mode())
         settings.setValue("visible", self.isVisible())
