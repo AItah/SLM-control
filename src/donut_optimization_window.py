@@ -814,6 +814,7 @@ class CostScanWorker(QtCore.QObject):
         count = 1
 
         scale = 1.0
+        last_pass = False
         while scale >= min_scale:
             if not self._running:
                 raise RuntimeError("Scan canceled.")
@@ -880,10 +881,13 @@ class CostScanWorker(QtCore.QObject):
                     break
 
             if improved:
+                if last_pass:
+                    break
                 continue
             scale /= shrink_factor
             if scale < min_scale:
-                break
+                scale = min_scale
+                last_pass = True
             self.log.emit(
                 f"Fast search reduce step scale={scale:.4f} "
                 f"step_x={step_x0 * scale:.4f} step_y={step_y0 * scale:.4f}"
