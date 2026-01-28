@@ -129,21 +129,31 @@ def make_vortex_phase(
     ell: int, 
     sft_x: float = 0.0, 
     sft_y: float = 0.0,
-    rotation: float = 0.0,
-    alpha: float = 1.0,  # X-axis scaling
-    beta: float = 1.0    # Y-axis scaling
+    axis_rotation_deg: float = 0.0,  # For correcting the ellipse (Correction)
+    phase_offset_deg: float = 0.0,   # For shifting the phase ramp (Diagnostic)
+    alpha: float = 1.0, 
+    beta: float = 1.0
 ) -> np.ndarray:
-    if not isinstance(ell, int) or ell < 1:
-        raise ValueError("ell must be a positive integer.")
     
-    # Scale coordinates to compensate for elliptical beam shape
-    dy = beta * (coords.Y - sft_y)
-    dx = alpha * (coords.X - sft_x)
+    # 1. Coordinate Rotation (Moves the axes for alpha/beta)
+    x = coords.X - sft_x
+    y = coords.Y - sft_y
+    rad_axis = np.radians(axis_rotation_deg)
     
-    # Calculate azimuthal angle with rotation
-    theta = np.arctan2(dy, dx) - rotation
+    x_rot =  x * np.cos(rad_axis) + y * np.sin(rad_axis)
+    y_rot = -x * np.sin(rad_axis) + y * np.cos(rad_axis)
     
-    return ell * theta
+    # 2. Calculate base theta with anamorphic scaling
+    theta = np.arctan2(beta * y_rot, alpha * x_rot)
+    
+    # 3. Apply Phase Offset (The diagnostic 'spin')
+    # This just shifts where the 0 to 2pi jump occurs
+    theta_with_offset = theta - np.radians(phase_offset_deg)
+    
+    return ell * theta_with_offset
+
+
+
 
 def make_zernike_phase(
     coords: Coordinates,
@@ -258,7 +268,8 @@ def generate_mask(
     ell: int,
     sft_x_m: float = 0.0,
     sft_y_m: float = 0.0,
-    rotation_rad: float = 0.0,
+    axis_rotation_deg: float = 0.0,
+    phase_offset_deg: float = 0.0,
     alpha: float = 1.0,
     beta: float = 1.0,
     zernike_offset_x_m: float = 0.0,
@@ -284,7 +295,8 @@ def generate_mask(
         ell,
         sft_x=sft_x_m,
         sft_y=sft_y_m,
-        rotation=rotation_rad,
+        axis_rotation_deg=axis_rotation_deg,
+        phase_offset_deg=phase_offset_deg,
         alpha=alpha,
         beta=beta,
     )

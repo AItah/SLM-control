@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import math
 from pathlib import Path
 from typing import Optional, TYPE_CHECKING
 
@@ -102,12 +101,28 @@ class VortexWindow(QtWidgets.QWidget):
         self.chk_force_zero.setChecked(True)
         self.chk_force_zero.setToolTip("Force the vortex center to land on an integer pixel.")
 
-        self.dsb_rotation_deg = QtWidgets.QDoubleSpinBox()
-        self.dsb_rotation_deg.setRange(-360.0, 360.0)
-        self.dsb_rotation_deg.setDecimals(2)
-        self.dsb_rotation_deg.setSuffix(" deg")
-        self.dsb_rotation_deg.setValue(0.0)
-        self.dsb_rotation_deg.setToolTip("Rotate the vortex phase (degrees).")
+        self.dsb_phase_offset_deg = QtWidgets.QDoubleSpinBox()
+        self.dsb_phase_offset_deg.setRange(-360.0, 360.0)
+        self.dsb_phase_offset_deg.setDecimals(2)
+        self.dsb_phase_offset_deg.setSuffix(" deg")
+        self.dsb_phase_offset_deg.setValue(0.0)
+        self.dsb_phase_offset_deg.setToolTip("Phase offset of the vortex (degrees).")
+        self.dsb_axis_rotation_deg = QtWidgets.QDoubleSpinBox()
+        self.dsb_axis_rotation_deg.setRange(-360.0, 360.0)
+        self.dsb_axis_rotation_deg.setDecimals(2)
+        self.dsb_axis_rotation_deg.setSuffix(" deg")
+        self.dsb_axis_rotation_deg.setValue(0.0)
+        self.dsb_axis_rotation_deg.setToolTip("Rotate vortex axes (degrees).")
+        self.dsb_alpha = QtWidgets.QDoubleSpinBox()
+        self.dsb_alpha.setRange(0.1, 10.0)
+        self.dsb_alpha.setDecimals(2)
+        self.dsb_alpha.setValue(1.0)
+        self.dsb_alpha.setToolTip("X-axis scaling (alpha).")
+        self.dsb_beta = QtWidgets.QDoubleSpinBox()
+        self.dsb_beta.setRange(0.1, 10.0)
+        self.dsb_beta.setDecimals(2)
+        self.dsb_beta.setValue(1.0)
+        self.dsb_beta.setToolTip("Y-axis scaling (beta).")
 
         vortex_layout.addWidget(QtWidgets.QLabel("Wavelength:"), r, 0)
         vortex_layout.addWidget(self.dsb_wavelength_nm, r, 1)
@@ -125,8 +140,15 @@ class VortexWindow(QtWidgets.QWidget):
         vortex_layout.addWidget(self.dsb_aperture_mm, r, 1)
         vortex_layout.addWidget(self.chk_force_zero, r, 2, 1, 2)
         r += 1
-        vortex_layout.addWidget(QtWidgets.QLabel("Rotation:"), r, 0)
-        vortex_layout.addWidget(self.dsb_rotation_deg, r, 1)
+        vortex_layout.addWidget(QtWidgets.QLabel("Phase offset:"), r, 0)
+        vortex_layout.addWidget(self.dsb_phase_offset_deg, r, 1)
+        vortex_layout.addWidget(QtWidgets.QLabel("Rotation:"), r, 2)
+        vortex_layout.addWidget(self.dsb_axis_rotation_deg, r, 3)
+        r += 1
+        vortex_layout.addWidget(QtWidgets.QLabel("Alpha:"), r, 0)
+        vortex_layout.addWidget(self.dsb_alpha, r, 1)
+        vortex_layout.addWidget(QtWidgets.QLabel("Beta:"), r, 2)
+        vortex_layout.addWidget(self.dsb_beta, r, 3)
 
         layout.addWidget(vortex_group)
 
@@ -412,7 +434,10 @@ class VortexWindow(QtWidgets.QWidget):
         self,
         offset_x_mm: Optional[float] = None,
         offset_y_mm: Optional[float] = None,
-        rotation_deg: Optional[float] = None,
+        phase_offset_deg: Optional[float] = None,
+        axis_rotation_deg: Optional[float] = None,
+        alpha: Optional[float] = None,
+        beta: Optional[float] = None,
         c_astig_v: Optional[float] = None,
         c_astig_o: Optional[float] = None,
         c_coma_y: Optional[float] = None,
@@ -422,7 +447,10 @@ class VortexWindow(QtWidgets.QWidget):
         result, _ = self._build_mask_from_ui(
             offset_x_mm=offset_x_mm,
             offset_y_mm=offset_y_mm,
-            rotation_deg=rotation_deg,
+            phase_offset_deg=phase_offset_deg,
+            axis_rotation_deg=axis_rotation_deg,
+            alpha=alpha,
+            beta=beta,
             c_astig_v=c_astig_v,
             c_astig_o=c_astig_o,
             c_coma_y=c_coma_y,
@@ -435,7 +463,10 @@ class VortexWindow(QtWidgets.QWidget):
         self,
         offset_x_mm: Optional[float] = None,
         offset_y_mm: Optional[float] = None,
-        rotation_deg: Optional[float] = None,
+        phase_offset_deg: Optional[float] = None,
+        axis_rotation_deg: Optional[float] = None,
+        alpha: Optional[float] = None,
+        beta: Optional[float] = None,
         c_astig_v: Optional[float] = None,
         c_astig_o: Optional[float] = None,
         c_coma_y: Optional[float] = None,
@@ -462,12 +493,22 @@ class VortexWindow(QtWidgets.QWidget):
         )
         sft_x_m = off_x * 1e-3
         sft_y_m = off_y * 1e-3
-        rotation_deg = (
-            float(self.dsb_rotation_deg.value())
-            if rotation_deg is None
-            else float(rotation_deg)
+        phase_offset_deg = (
+            float(self.dsb_phase_offset_deg.value())
+            if phase_offset_deg is None
+            else float(phase_offset_deg)
         )
-        rotation_rad = math.radians(rotation_deg)
+        axis_rotation_deg = (
+            float(self.dsb_axis_rotation_deg.value())
+            if axis_rotation_deg is None
+            else float(axis_rotation_deg)
+        )
+        alpha_val = (
+            float(self.dsb_alpha.value()) if alpha is None else float(alpha)
+        )
+        beta_val = (
+            float(self.dsb_beta.value()) if beta is None else float(beta)
+        )
 
         aperture_radius_m = None
         aperture_mm = float(self.dsb_aperture_mm.value())
@@ -503,7 +544,10 @@ class VortexWindow(QtWidgets.QWidget):
             ell=ell,
             sft_x_m=sft_x_m,
             sft_y_m=sft_y_m,
-            rotation_rad=rotation_rad,
+            axis_rotation_deg=axis_rotation_deg,
+            phase_offset_deg=phase_offset_deg,
+            alpha=alpha_val,
+            beta=beta_val,
             zernike_offset_x_m=sft_x_m,
             zernike_offset_y_m=sft_y_m,
             c_astig_v=float(self.dsb_astig_v.value())
@@ -585,7 +629,17 @@ class VortexWindow(QtWidgets.QWidget):
         self.dsb_offset_x_mm.setValue(float(settings.value("offset_x_mm", 0.0)))
         self.dsb_offset_y_mm.setValue(float(settings.value("offset_y_mm", 0.0)))
         self.dsb_aperture_mm.setValue(float(settings.value("aperture_mm", 0.0)))
-        self.dsb_rotation_deg.setValue(float(settings.value("rotation_deg", 0.0)))
+        if settings.contains("phase_offset_deg"):
+            self.dsb_phase_offset_deg.setValue(
+                float(settings.value("phase_offset_deg", 0.0))
+            )
+        else:
+            self.dsb_phase_offset_deg.setValue(float(settings.value("rotation_deg", 0.0)))
+        self.dsb_axis_rotation_deg.setValue(
+            float(settings.value("axis_rotation_deg", 0.0))
+        )
+        self.dsb_alpha.setValue(float(settings.value("alpha", 1.0)))
+        self.dsb_beta.setValue(float(settings.value("beta", 1.0)))
         self.chk_force_zero.setChecked(bool(settings.value("force_zero", True, bool)))
         self.chk_use_fork.setChecked(bool(settings.value("use_fork", True, bool)))
         self.cmb_steer_mode.setCurrentText(settings.value("steer_mode", "shift"))
@@ -617,7 +671,12 @@ class VortexWindow(QtWidgets.QWidget):
         settings.setValue("offset_x_mm", float(self.dsb_offset_x_mm.value()))
         settings.setValue("offset_y_mm", float(self.dsb_offset_y_mm.value()))
         settings.setValue("aperture_mm", float(self.dsb_aperture_mm.value()))
-        settings.setValue("rotation_deg", float(self.dsb_rotation_deg.value()))
+        settings.setValue("phase_offset_deg", float(self.dsb_phase_offset_deg.value()))
+        settings.setValue(
+            "axis_rotation_deg", float(self.dsb_axis_rotation_deg.value())
+        )
+        settings.setValue("alpha", float(self.dsb_alpha.value()))
+        settings.setValue("beta", float(self.dsb_beta.value()))
         settings.setValue("force_zero", self.chk_force_zero.isChecked())
         settings.setValue("use_fork", self.chk_use_fork.isChecked())
         settings.setValue("steer_mode", self.cmb_steer_mode.currentText())
