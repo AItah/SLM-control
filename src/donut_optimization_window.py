@@ -846,9 +846,9 @@ class CostScanWorker(QtCore.QObject):
                 count += 1
                 self.progress.emit(min(count, progress_est), progress_est)
                 self.log.emit(
-                    f"Fast dir={math.degrees(angle):.1f} "
-                    f"{labels[0]}={cand_x:.3f} {labels[1]}={cand_y:.3f} cost={cost:.4f} "
-                    f"step_x={step_x:.4f} step_y={step_y:.4f}"
+                    f"Scan {labels[0]}={cand_x:.3f} {labels[1]}={cand_y:.3f} "
+                    f"cost={cost:.4f} step_x={step_x:.4f} step_y={step_y:.4f} "
+                    f"dir={math.degrees(angle):.1f}"
                 )
                 if cost < best_cost:
                     best_cost = cost
@@ -866,9 +866,9 @@ class CostScanWorker(QtCore.QObject):
                         count += 1
                         self.progress.emit(min(count, progress_est), progress_est)
                         self.log.emit(
-                            f"Fast dir={math.degrees(angle):.1f} "
-                            f"{labels[0]}={cand_x:.3f} {labels[1]}={cand_y:.3f} cost={cost:.4f} "
-                            f"step_x={step_x:.4f} step_y={step_y:.4f}"
+                            f"Scan {labels[0]}={cand_x:.3f} {labels[1]}={cand_y:.3f} "
+                            f"cost={cost:.4f} step_x={step_x:.4f} step_y={step_y:.4f} "
+                            f"dir={math.degrees(angle):.1f}"
                         )
                         if cost < best_cost:
                             best_cost = cost
@@ -2425,7 +2425,7 @@ class DonutOptimizationWindow(QtWidgets.QDialog):
         )
 
         self._thread = QtCore.QThread(self)
-        if self.chk_cost_scan.isChecked():
+        if self.chk_cost_scan.isChecked() or self.chk_fast_search.isChecked():
             self._worker = CostScanWorker(self._vortex, self._slm, self._camera, settings)
             self._worker.moveToThread(self._thread)
             self._thread.started.connect(self._worker.run)
