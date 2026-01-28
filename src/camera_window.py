@@ -365,6 +365,30 @@ class CameraWindow(QtWidgets.QWidget):
             self.point_selected.emit(self._selected_point)
         self._refresh_last_frame()
 
+    def set_selected_circle(
+        self,
+        center: Optional[Tuple[float, float]],
+        radius: Optional[float],
+        emit: bool = False,
+    ) -> None:
+        self._selected_circle_center = (
+            (float(center[0]), float(center[1])) if center is not None else None
+        )
+        self._selected_circle_radius = float(radius) if radius is not None else None
+        self._circle_selecting = False
+        self._circle_dragging = False
+        self._circle_edit_mode = None
+        self._circle_drag_offset = None
+        if emit and self._selected_circle_center is not None and self._selected_circle_radius is not None:
+            self.circle_selected.emit(
+                (
+                    float(self._selected_circle_center[0]),
+                    float(self._selected_circle_center[1]),
+                    float(self._selected_circle_radius),
+                )
+            )
+        self._refresh_last_frame()
+
     def begin_circle_selection(self, center: Optional[Tuple[float, float]] = None) -> None:
         if self._thread is None:
             self._append_error("Camera is not running.")

@@ -75,6 +75,10 @@ class OffsetScanWorker(QtCore.QObject):
             float(self._settings.dark_hint[0]),
             float(self._settings.dark_hint[1]),
         )
+        self._circle_center = (
+            float(self._settings.circle_center[0]),
+            float(self._settings.circle_center[1]),
+        )
 
     @QtCore.Slot()
     def run(self) -> None:
@@ -222,7 +226,7 @@ class OffsetScanWorker(QtCore.QObject):
             thr = float(self._settings.filter_threshold)
             gray = gray.copy()
             gray[gray < thr] = 0.0
-        cx, cy = self._settings.circle_center
+        cx, cy = self._circle_center
         radius = float(self._settings.circle_radius)
 
         hx, hy = self._current_dark
@@ -278,6 +282,7 @@ class OffsetScanWorker(QtCore.QObject):
         )
         self._current_dark = dark_center
         self.dark_center.emit(dark_center)
+        self._circle_center = (float(dark_center[0]), float(dark_center[1]))
 
         if self._settings.debug_enabled:
             crop = self._crop_circle_mask(gray, (cx, cy), radius)
@@ -698,6 +703,10 @@ class CostScanWorker(QtCore.QObject):
             float(self._settings.dark_hint[0]),
             float(self._settings.dark_hint[1]),
         )
+        self._circle_center = (
+            float(self._settings.circle_center[0]),
+            float(self._settings.circle_center[1]),
+        )
 
     @QtCore.Slot()
     def run(self) -> None:
@@ -1072,7 +1081,7 @@ class CostScanWorker(QtCore.QObject):
             gray = gray.copy()
             gray[gray < thr] = 0.0
 
-        cx, cy = self._settings.circle_center
+        cx, cy = self._circle_center
         radius = float(self._settings.circle_radius)
         crop = OffsetScanWorker._crop_circle_mask(gray, (cx, cy), radius)
         x0c, y0c, _, _ = OffsetScanWorker._circle_crop_bounds(
@@ -1084,6 +1093,7 @@ class CostScanWorker(QtCore.QObject):
         if dark_center is not None:
             self._current_dark = (float(dark_center[0]), float(dark_center[1]))
             self.dark_center.emit(self._current_dark)
+            self._circle_center = self._current_dark
 
         dark_x, dark_y = self._current_dark
         center_in_crop = (float(dark_x - x0c), float(dark_y - y0c))
@@ -2369,5 +2379,9 @@ class DonutOptimizationWindow(QtWidgets.QDialog):
 
     def _on_dark_center_update(self, point: Tuple[float, float]) -> None:
         self._manual_center = (float(point[0]), float(point[1]))
+        if self._manual_radius is not None:
+            self._circle_center = (float(point[0]), float(point[1]))
         self._update_manual_labels()
         self._camera.set_selected_point(self._manual_center, emit=False)
+        if self._manual_radius is not None and hasattr(self._camera, "set_selected_circle"):
+            self._camera.set_selected_circle(self._circle_center, self._manual_radius, emit=False)
