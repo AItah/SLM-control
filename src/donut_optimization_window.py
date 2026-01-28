@@ -2705,7 +2705,14 @@ class DonutOptimizationWindow(QtWidgets.QDialog):
         self._vortex.set_offsets_mm(best_x, best_y)
         self._stop()
 
-    def _on_scan_finished(self, result: dict) -> None:
+    @QtCore.Slot(object)
+    def _on_scan_finished(self, result: object) -> None:
+        if isinstance(result, (tuple, list)) and len(result) >= 3:
+            result = {"a": result[0], "b": result[1], "c": None, "csv_path": result[2]}
+        if not isinstance(result, dict):
+            self._append_error("Scan finished with unexpected result format.")
+            self._stop()
+            return
         mode = self._active_scan_mode or "shift"
         best_x = float(result.get("a", 0.0))
         best_y = float(result.get("b", 0.0))
@@ -2926,6 +2933,9 @@ class DonutOptimizationWindow(QtWidgets.QDialog):
             fast_min_step=float(self.dsb_fast_min_step.value()),
             fast_shrink_factor=float(self.dsb_fast_shrink.value()),
             fast_multi_pass=True,
+            shape_step_alpha=float(self.dsb_shape_step_alpha.value()),
+            shape_step_beta=float(self.dsb_shape_step_beta.value()),
+            shape_step_rot_deg=float(self.dsb_shape_step_rot.value()),
             scan_mode=mode,
         )
 
