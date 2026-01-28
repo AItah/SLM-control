@@ -1535,6 +1535,12 @@ def main():
     _apply_dark_theme(app)
     QtCore.QCoreApplication.setOrganizationName("STED")
     QtCore.QCoreApplication.setApplicationName("SLMControl")
+    settings_dir = ROOT / "settings"
+    settings_dir.mkdir(exist_ok=True)
+    QtCore.QSettings.setDefaultFormat(QtCore.QSettings.IniFormat)
+    QtCore.QSettings.setPath(
+        QtCore.QSettings.IniFormat, QtCore.QSettings.UserScope, str(settings_dir)
+    )
 
     store = SlmParamsStore()
     params_window = SlmParamsWindow(store)

@@ -196,7 +196,9 @@ class SlmControlWindow(QtWidgets.QWidget):
 
         top = QtWidgets.QHBoxLayout()
         self.btn_connect = QtWidgets.QPushButton("Connect SLM")
+        self.btn_connect.setToolTip("Connect to the SLM hardware.")
         self.btn_disconnect = QtWidgets.QPushButton("Disconnect")
+        self.btn_disconnect.setToolTip("Disconnect from the SLM hardware.")
         self.btn_disconnect.setEnabled(False)
         self.lbl_params = QtWidgets.QLabel("SLM params: not loaded")
         self.lbl_params.setAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
@@ -210,10 +212,13 @@ class SlmControlWindow(QtWidgets.QWidget):
         windows_layout = QtWidgets.QHBoxLayout(windows_box)
         self.chk_window_params = QtWidgets.QCheckBox("SLM Parameters")
         self.chk_window_params.setChecked(True)
+        self.chk_window_params.setToolTip("Show or hide the SLM Parameters window.")
         self.chk_window_vortex = QtWidgets.QCheckBox("Vortex Generator")
         self.chk_window_vortex.setChecked(True)
+        self.chk_window_vortex.setToolTip("Show or hide the Vortex Generator window.")
         self.chk_window_camera = QtWidgets.QCheckBox("Camera Viewer")
         self.chk_window_camera.setChecked(False)
+        self.chk_window_camera.setToolTip("Show or hide the Camera Viewer window.")
         windows_layout.addWidget(self.chk_window_params)
         windows_layout.addWidget(self.chk_window_vortex)
         windows_layout.addWidget(self.chk_window_camera)
@@ -225,6 +230,8 @@ class SlmControlWindow(QtWidgets.QWidget):
 
         self.ed_current_bmp = QtWidgets.QLineEdit()
         self.btn_pick_current_bmp = QtWidgets.QPushButton("Browse...")
+        self.ed_current_bmp.setToolTip("BMP mask file to send to the SLM.")
+        self.btn_pick_current_bmp.setToolTip("Browse for a BMP mask file.")
         self.btn_pick_current_bmp.clicked.connect(self._pick_bmp)
 
         grid.addWidget(QtWidgets.QLabel("Current BMP:"), r, 0)
@@ -235,6 +242,7 @@ class SlmControlWindow(QtWidgets.QWidget):
         self.spin_slot = QtWidgets.QSpinBox()
         self.spin_slot.setRange(0, 818)
         self.spin_slot.setValue(0)
+        self.spin_slot.setToolTip("SLM slot index used for send/read actions.")
 
         grid.addWidget(QtWidgets.QLabel("Slot:"), r, 0)
         grid.addWidget(self.spin_slot, r, 1)
@@ -242,6 +250,8 @@ class SlmControlWindow(QtWidgets.QWidget):
 
         self.btn_send_to_slot = QtWidgets.QPushButton("Send BMP to slot")
         self.btn_change_display = QtWidgets.QPushButton("Change display slot")
+        self.btn_send_to_slot.setToolTip("Write the BMP file into the selected slot.")
+        self.btn_change_display.setToolTip("Display the selected slot on the SLM.")
         grid.addWidget(self.btn_send_to_slot, r, 0, 1, 2)
         grid.addWidget(self.btn_change_display, r, 2, 1, 2)
         r += 1
@@ -249,6 +259,9 @@ class SlmControlWindow(QtWidgets.QWidget):
         self.btn_temp = QtWidgets.QPushButton("Read temperature")
         self.btn_check_display = QtWidgets.QPushButton("Check DISPLAYED image")
         self.btn_check_fmem = QtWidgets.QPushButton("Check FMEM image")
+        self.btn_temp.setToolTip("Read the current SLM head temperature.")
+        self.btn_check_display.setToolTip("Read back the currently displayed image.")
+        self.btn_check_fmem.setToolTip("Read back the image stored in the selected slot.")
         grid.addWidget(self.btn_temp, r, 0, 1, 2)
         grid.addWidget(self.btn_check_display, r, 2, 1, 2)
         grid.addWidget(self.btn_check_fmem, r, 4, 1, 1)
@@ -259,6 +272,8 @@ class SlmControlWindow(QtWidgets.QWidget):
         self.spin_interval.setRange(1, 3600)
         self.spin_interval.setValue(10)
         self.spin_interval.setSuffix(" s")
+        self.chk_watchdog.setToolTip("Periodically check temperature and warn if too high.")
+        self.spin_interval.setToolTip("Watchdog polling interval in seconds.")
         grid.addWidget(self.chk_watchdog, r, 0, 1, 2)
         grid.addWidget(QtWidgets.QLabel("Interval:"), r, 2)
         grid.addWidget(self.spin_interval, r, 3)

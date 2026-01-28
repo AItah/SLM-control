@@ -99,6 +99,7 @@ class VortexWindow(QtWidgets.QWidget):
 
         self.chk_force_zero = QtWidgets.QCheckBox("Force pixel-zero center")
         self.chk_force_zero.setChecked(True)
+        self.chk_force_zero.setToolTip("Force the vortex center to land on an integer pixel.")
 
         vortex_layout.addWidget(QtWidgets.QLabel("Wavelength:"), r, 0)
         vortex_layout.addWidget(self.dsb_wavelength_nm, r, 1)
@@ -123,6 +124,7 @@ class VortexWindow(QtWidgets.QWidget):
         calib_layout = QtWidgets.QHBoxLayout(calib_group)
         self.ed_calib = QtWidgets.QLineEdit()
         self.btn_calib_browse = QtWidgets.QPushButton("Browse...")
+        self.btn_calib_browse.setToolTip("Select a calibration mask file.")
         self.btn_calib_browse.clicked.connect(self._pick_calibration)
         calib_layout.addWidget(QtWidgets.QLabel("Calibration mask:"))
         calib_layout.addWidget(self.ed_calib, 1)
@@ -136,6 +138,7 @@ class VortexWindow(QtWidgets.QWidget):
 
         self.chk_use_fork = QtWidgets.QCheckBox("Use fork grating")
         self.chk_use_fork.setChecked(True)
+        self.chk_use_fork.setToolTip("Enable fork grating for beam steering.")
         self.chk_use_fork.stateChanged.connect(self._update_steer_mode)
 
         self.cmb_steer_mode = QtWidgets.QComboBox()
@@ -196,6 +199,7 @@ class VortexWindow(QtWidgets.QWidget):
         r = 0
         self.chk_use_zernike = QtWidgets.QCheckBox("Enable Zernike corrections")
         self.chk_use_zernike.setChecked(False)
+        self.chk_use_zernike.setToolTip("Enable Zernike aberration corrections.")
         zern_layout.addWidget(self.chk_use_zernike, r, 0, 1, 2)
         r += 1
 
@@ -246,6 +250,7 @@ class VortexWindow(QtWidgets.QWidget):
         self.spin_slot.setValue(-1)
         self.spin_slot.setToolTip("Slot 0-15 writes to SLM; -1 saves to file only.")
         self.btn_generate = QtWidgets.QPushButton("Generate Vortex Mask")
+        self.btn_generate.setToolTip("Generate the vortex mask and save/send it.")
         self.btn_generate.clicked.connect(self._on_generate)
         actions.addWidget(QtWidgets.QLabel("Slot:"))
         actions.addWidget(self.spin_slot)
@@ -259,6 +264,7 @@ class VortexWindow(QtWidgets.QWidget):
         layout.addWidget(self.log, 1)
 
         self.btn_optimize = QtWidgets.QPushButton("Donut Optimization...")
+        self.btn_optimize.setToolTip("Open the Donut Optimization Wizard.")
         self.btn_optimize.clicked.connect(self._open_donut_opt)
         layout.addWidget(self.btn_optimize, 0)
 

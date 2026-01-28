@@ -1719,10 +1719,15 @@ class DebugWindow(QtWidgets.QDialog):
             radius = meta["radius"]
             r_min = meta.get("r_min")
             r_max = meta.get("r_max")
-            lines.append(
-                f"center=({cx:.2f}, {cy:.2f}) radius={radius:.2f} "
-                f"r_min={r_min:.2f} r_max={r_max:.2f}"
-            )
+            if r_min is None or r_max is None:
+                lines.append(
+                    f"center=({cx:.2f}, {cy:.2f}) radius={radius:.2f}"
+                )
+            else:
+                lines.append(
+                    f"center=({cx:.2f}, {cy:.2f}) radius={radius:.2f} "
+                    f"r_min={r_min:.2f} r_max={r_max:.2f}"
+                )
         if "fit_center" in meta:
             fx, fy = meta["fit_center"]
             lines.append(f"fit_center=({fx:.2f}, {fy:.2f})")
@@ -1952,12 +1957,16 @@ class DonutOptimizationWindow(QtWidgets.QDialog):
         self.lbl_manual_center = QtWidgets.QLabel("Hint (dark spot): not set")
         self.lbl_manual_radius = QtWidgets.QLabel("Circle: not set")
         self.btn_pick_center = QtWidgets.QPushButton("Pick dark spot")
+        self.btn_pick_center.setToolTip("Click the dark spot center in the camera view.")
         self.btn_pick_center.clicked.connect(self._pick_dark_spot)
         self.btn_pick_circle = QtWidgets.QPushButton("Draw donut circle")
+        self.btn_pick_circle.setToolTip("Draw the donut circle on the camera view.")
         self.btn_pick_circle.clicked.connect(self._pick_donut_circle)
         self.btn_analyze = QtWidgets.QPushButton("Donut analysis")
+        self.btn_analyze.setToolTip("Analyze a single frame and update the debug plots.")
         self.btn_analyze.clicked.connect(self._run_donut_analysis)
         self.btn_refine_dark = QtWidgets.QPushButton("Refine dark spot")
+        self.btn_refine_dark.setToolTip("Refine the dark spot center using CV.")
         self.btn_refine_dark.clicked.connect(self._refine_dark_spot)
         self.dsb_px_um = QtWidgets.QDoubleSpinBox()
         self.dsb_px_um.setRange(0.01, 1000.0)
@@ -1966,10 +1975,12 @@ class DonutOptimizationWindow(QtWidgets.QDialog):
         self.dsb_px_um.setSuffix(" um/px")
         self.chk_filter = QtWidgets.QCheckBox("Zero below threshold")
         self.chk_filter.setChecked(False)
+        self.chk_filter.setToolTip("Zero pixels below the threshold before analysis.")
         self.spin_filter = QtWidgets.QSpinBox()
         self.spin_filter.setRange(0, 255)
         self.spin_filter.setValue(10)
         self.btn_clear_manual = QtWidgets.QPushButton("Clear")
+        self.btn_clear_manual.setToolTip("Clear the selected dark spot and circle.")
         self.btn_clear_manual.clicked.connect(self._clear_manual_target)
         self.dsb_auto_circle_mm = QtWidgets.QDoubleSpinBox()
         self.dsb_auto_circle_mm.setRange(0.000001, 1000.0)
@@ -2044,10 +2055,12 @@ class DonutOptimizationWindow(QtWidgets.QDialog):
         scan_layout.addWidget(self.spin_angles, r, 1)
         self.chk_cost_scan = QtWidgets.QCheckBox("Use cost scan (snake)")
         self.chk_cost_scan.setChecked(True)
+        self.chk_cost_scan.setToolTip("Use full grid (snake) scan across X/Y.")
         scan_layout.addWidget(self.chk_cost_scan, r, 2, 1, 2)
         r += 1
         self.chk_fast_search = QtWidgets.QCheckBox("Use fast search")
         self.chk_fast_search.setChecked(False)
+        self.chk_fast_search.setToolTip("Use directional fast search instead of full grid.")
         scan_layout.addWidget(self.chk_fast_search, r, 2, 1, 2)
         r += 1
         scan_layout.addWidget(QtWidgets.QLabel("Fast min step"), r, 0)
@@ -2059,12 +2072,17 @@ class DonutOptimizationWindow(QtWidgets.QDialog):
         scan_layout.addWidget(self.dsb_fast_min_step, r, 1)
         self.chk_fast_multi = QtWidgets.QCheckBox("Multi-pass fast search")
         self.chk_fast_multi.setChecked(True)
+        self.chk_fast_multi.setToolTip("Run multiple passes with shrinking step size.")
         scan_layout.addWidget(self.chk_fast_multi, r, 2, 1, 2)
         r += 1
         self.rb_scan_shift = QtWidgets.QRadioButton("Shift")
         self.rb_scan_astig = QtWidgets.QRadioButton("Astigmatism")
         self.rb_scan_coma = QtWidgets.QRadioButton("Coma")
         self.rb_scan_spher = QtWidgets.QRadioButton("Spherical")
+        self.rb_scan_shift.setToolTip("Optimize X/Y shift offsets.")
+        self.rb_scan_astig.setToolTip("Optimize astigmatism coefficients.")
+        self.rb_scan_coma.setToolTip("Optimize coma coefficients.")
+        self.rb_scan_spher.setToolTip("Optimize spherical coefficient.")
         self.rb_scan_shift.setChecked(True)
         self.scan_group = QtWidgets.QButtonGroup(self)
         for rb in (
@@ -2086,6 +2104,8 @@ class DonutOptimizationWindow(QtWidgets.QDialog):
         btns = QtWidgets.QHBoxLayout()
         self.btn_start = QtWidgets.QPushButton("Start")
         self.btn_stop = QtWidgets.QPushButton("Stop")
+        self.btn_start.setToolTip("Start the optimization scan.")
+        self.btn_stop.setToolTip("Stop the current scan.")
         self.btn_stop.setEnabled(False)
         btns.addWidget(self.btn_start)
         btns.addWidget(self.btn_stop)
@@ -2106,6 +2126,8 @@ class DonutOptimizationWindow(QtWidgets.QDialog):
         self.chk_debug = QtWidgets.QCheckBox("Enable debug view")
         self.chk_debug.setChecked(False)
         self.btn_debug = QtWidgets.QPushButton("Open Debug Window")
+        self.chk_debug.setToolTip("Enable debug plots during scanning.")
+        self.btn_debug.setToolTip("Open the donut optimization debug window.")
         self.btn_debug.clicked.connect(self._open_debug)
         dbg = QtWidgets.QHBoxLayout()
         dbg.addWidget(self.chk_debug)
