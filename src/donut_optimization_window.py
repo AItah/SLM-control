@@ -845,8 +845,7 @@ class CostScanWorker(QtCore.QObject):
         base: dict,
     ) -> Tuple[float, float, float, float, float, int]:
         best_x, best_y = center
-        improved = True
-        while improved and (step_x >= min_step_x or step_y >= min_step_y):
+        while step_x >= min_step_x or step_y >= min_step_y:
             improved = False
 
             best_x, best_y, best_cost, step_x, count, improved_x = self._walk_axis(
@@ -880,6 +879,14 @@ class CostScanWorker(QtCore.QObject):
                 step_y = min_step_y
 
             improved = improved_x or improved_y
+            if improved:
+                continue
+
+            new_step_x = max(min_step_x, step_x * 0.5) if step_x > min_step_x else step_x
+            new_step_y = max(min_step_y, step_y * 0.5) if step_y > min_step_y else step_y
+            if new_step_x == step_x and new_step_y == step_y:
+                break
+            step_x, step_y = new_step_x, new_step_y
 
         return best_x, best_y, best_cost, step_x, step_y, count
 
