@@ -728,9 +728,7 @@ class CostScanWorker(QtCore.QObject):
             time.sleep(0.05)
 
     def _run_scan(self) -> Tuple[float, float, str]:
-        if self._settings.fast_search:
-            return self._run_fast_search()
-        return self._run_snake_scan()
+        return self._run_fast_search()
 
     def _run_snake_scan(self) -> Tuple[float, float, str]:
         xs, ys, labels, base = self._scan_grid()
@@ -2057,14 +2055,9 @@ class DonutOptimizationWindow(QtWidgets.QDialog):
         self.spin_angles.setValue(10)
         scan_layout.addWidget(QtWidgets.QLabel("Angles"), r, 0)
         scan_layout.addWidget(self.spin_angles, r, 1)
-        self.chk_cost_scan = QtWidgets.QCheckBox("Use cost scan (snake)")
-        self.chk_cost_scan.setChecked(True)
-        self.chk_cost_scan.setToolTip("Use full grid (snake) scan across X/Y.")
-        scan_layout.addWidget(self.chk_cost_scan, r, 2, 1, 2)
-        r += 1
         self.chk_fast_search = QtWidgets.QCheckBox("Use fast search")
-        self.chk_fast_search.setChecked(False)
-        self.chk_fast_search.setToolTip("Use directional fast search instead of full grid.")
+        self.chk_fast_search.setChecked(True)
+        self.chk_fast_search.setToolTip("Use directional fast search.")
         scan_layout.addWidget(self.chk_fast_search, r, 2, 1, 2)
         r += 1
         scan_layout.addWidget(QtWidgets.QLabel("Fast min step"), r, 0)
@@ -2425,26 +2418,15 @@ class DonutOptimizationWindow(QtWidgets.QDialog):
         )
 
         self._thread = QtCore.QThread(self)
-        if self.chk_cost_scan.isChecked() or self.chk_fast_search.isChecked():
-            self._worker = CostScanWorker(self._vortex, self._slm, self._camera, settings)
-            self._worker.moveToThread(self._thread)
-            self._thread.started.connect(self._worker.run)
-            self._worker.log.connect(self._append_log)
-            self._worker.progress.connect(self._on_progress)
-            self._worker.failed.connect(self._on_failed)
-            self._worker.finished.connect(self._on_scan_finished)
-            self._worker.debug_data.connect(self._on_debug_data)
-            self._worker.dark_center.connect(self._on_dark_center_update)
-        else:
-            self._worker = OffsetScanWorker(self._vortex, self._slm, self._camera, settings)
-            self._worker.moveToThread(self._thread)
-            self._thread.started.connect(self._worker.run)
-            self._worker.log.connect(self._append_log)
-            self._worker.progress.connect(self._on_progress)
-            self._worker.failed.connect(self._on_failed)
-            self._worker.finished.connect(self._on_finished)
-            self._worker.debug_data.connect(self._on_debug_data)
-            self._worker.dark_center.connect(self._on_dark_center_update)
+        self._worker = CostScanWorker(self._vortex, self._slm, self._camera, settings)
+        self._worker.moveToThread(self._thread)
+        self._thread.started.connect(self._worker.run)
+        self._worker.log.connect(self._append_log)
+        self._worker.progress.connect(self._on_progress)
+        self._worker.failed.connect(self._on_failed)
+        self._worker.finished.connect(self._on_scan_finished)
+        self._worker.debug_data.connect(self._on_debug_data)
+        self._worker.dark_center.connect(self._on_dark_center_update)
         self._thread.start()
         self.btn_start.setEnabled(False)
         self.btn_stop.setEnabled(True)
@@ -2522,8 +2504,7 @@ class DonutOptimizationWindow(QtWidgets.QDialog):
         self.spin_settle.setValue(int(settings.value("settle_ms", self.spin_settle.value())))
         self.spin_slot.setValue(int(settings.value("slot", self.spin_slot.value())))
         self.spin_angles.setValue(int(settings.value("angles_count", self.spin_angles.value())))
-        self.chk_cost_scan.setChecked(bool(settings.value("cost_scan", True, bool)))
-        self.chk_fast_search.setChecked(bool(settings.value("fast_search", False, bool)))
+        self.chk_fast_search.setChecked(bool(settings.value("fast_search", True, bool)))
         self.dsb_fast_min_step.setValue(
             float(settings.value("fast_min_step", self.dsb_fast_min_step.value()))
         )
@@ -2593,7 +2574,6 @@ class DonutOptimizationWindow(QtWidgets.QDialog):
         settings.setValue("settle_ms", int(self.spin_settle.value()))
         settings.setValue("slot", int(self.spin_slot.value()))
         settings.setValue("angles_count", int(self.spin_angles.value()))
-        settings.setValue("cost_scan", self.chk_cost_scan.isChecked())
         settings.setValue("fast_search", self.chk_fast_search.isChecked())
         settings.setValue("fast_min_step", float(self.dsb_fast_min_step.value()))
         settings.setValue("fast_multi_pass", self.chk_fast_multi.isChecked())
