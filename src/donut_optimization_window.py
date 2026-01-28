@@ -750,8 +750,9 @@ class CostScanWorker(QtCore.QObject):
 
         step_x = float(self._settings.x_step_mm)
         step_y = float(self._settings.y_step_mm)
-        min_step_x = max(step_x * 0.1, 0.001)
-        min_step_y = max(step_y * 0.1, 0.001)
+        min_step_user = max(float(self._settings.fast_min_step), 1e-6)
+        min_step_x = min(step_x, min_step_user)
+        min_step_y = min(step_y, min_step_user)
 
         results: list[tuple[float, float, float]] = []
         best_x, best_y = center_x, center_y
@@ -762,46 +763,125 @@ class CostScanWorker(QtCore.QObject):
         )
 
         progress_est = max(
-            4, int((self._settings.x_range_mm / min_step_x) + (self._settings.y_range_mm / min_step_y))
+            4,
+            int(
+                (self._settings.x_range_mm / max(min_step_x, 1e-6))
+                + (self._settings.y_range_mm / max(min_step_y, 1e-6))
+            ),
         )
         count = 1
 
-        improved = True
-        while improved and (step_x >= min_step_x or step_y >= min_step_y):
-            improved = False
+        if self._settings.fast_multi_pass:
+            pass_idx = 0
+            pass_step_x = step_x
+            pass_step_y = step_y
+            while True:
+                pass_idx += 1
+                pass_min_x = max(min_step_x, pass_step_x * 0.5)
+                pass_min_y = max(min_step_y, pass_step_y * 0.5)
+                self.log.emit(
+                    "Fast pass "
+                    f"{pass_idx} step_x={pass_step_x:.4f} step_y={pass_step_y:.4f} "
+                    f"min_x={pass_min_x:.4f} min_y={pass_min_y:.4f}"
+                )
 
-            best_x, best_y, best_cost, step_x, count, improved = self._walk_axis(
-                axis="x",
+                best_x, best_y, best_cost, step_x, step_y, count = self._fast_search_attempt(
+                    center=(best_x, best_y),
+                    step_x=pass_step_x,
+                    step_y=pass_step_y,
+                    min_step_x=pass_min_x,
+                    min_step_y=pass_min_y,
+                    bounds_x=(bound_x_lo, bound_x_hi),
+                    bounds_y=(bound_y_lo, bound_y_hi),
+                    best_cost=best_cost,
+                    results=results,
+                    count=count,
+                    total=progress_est,
+                    base=base,
+                )
+
+                pass_step_x = max(min_step_x, step_x)
+                pass_step_y = max(min_step_y, step_y)
+
+                if pass_step_x <= min_step_x and pass_step_y <= min_step_y:
+                    break
+                if pass_step_x == pass_min_x and pass_step_y == pass_min_y:
+                    break
+        else:
+            best_x, best_y, best_cost, step_x, step_y, count = self._fast_search_attempt(
                 center=(best_x, best_y),
-                step=step_x,
-                min_step=min_step_x,
-                bounds=(bound_x_lo, bound_x_hi),
+                step_x=step_x,
+                step_y=step_y,
+                min_step_x=min_step_x,
+                min_step_y=min_step_y,
+                bounds_x=(bound_x_lo, bound_x_hi),
+                bounds_y=(bound_y_lo, bound_y_hi),
                 best_cost=best_cost,
                 results=results,
                 count=count,
                 total=progress_est,
                 base=base,
             )
-
-            best_x, best_y, best_cost, step_y, count, improved_y = self._walk_axis(
-                axis="y",
-                center=(best_x, best_y),
-                step=step_y,
-                min_step=min_step_y,
-                bounds=(bound_y_lo, bound_y_hi),
-                best_cost=best_cost,
-                results=results,
-                count=count,
-                total=progress_est,
-                base=base,
-            )
-            improved = improved or improved_y
 
         csv_path = self._write_csv(results, labels)
         self.log.emit(
             f"Fast search complete. Best cost={best_cost:.4f} at {labels[0]}={best_x:.3f} {labels[1]}={best_y:.3f}"
         )
         return best_x, best_y, csv_path
+
+    def _fast_search_attempt(
+        self,
+        center: Tuple[float, float],
+        step_x: float,
+        step_y: float,
+        min_step_x: float,
+        min_step_y: float,
+        bounds_x: Tuple[float, float],
+        bounds_y: Tuple[float, float],
+        best_cost: float,
+        results: list[tuple[float, float, float]],
+        count: int,
+        total: int,
+        base: dict,
+    ) -> Tuple[float, float, float, float, float, int]:
+        best_x, best_y = center
+        improved = True
+        while improved and (step_x >= min_step_x or step_y >= min_step_y):
+            improved = False
+
+            best_x, best_y, best_cost, step_x, count, improved_x = self._walk_axis(
+                axis="x",
+                center=(best_x, best_y),
+                step=step_x,
+                min_step=min_step_x,
+                bounds=bounds_x,
+                best_cost=best_cost,
+                results=results,
+                count=count,
+                total=total,
+                base=base,
+            )
+            if step_x < min_step_x:
+                step_x = min_step_x
+
+            best_x, best_y, best_cost, step_y, count, improved_y = self._walk_axis(
+                axis="y",
+                center=(best_x, best_y),
+                step=step_y,
+                min_step=min_step_y,
+                bounds=bounds_y,
+                best_cost=best_cost,
+                results=results,
+                count=count,
+                total=total,
+                base=base,
+            )
+            if step_y < min_step_y:
+                step_y = min_step_y
+
+            improved = improved_x or improved_y
+
+        return best_x, best_y, best_cost, step_x, step_y, count
 
     def _walk_axis(
         self,
@@ -1773,8 +1853,8 @@ class DonutOptimizationWindow(QtWidgets.QDialog):
         r += 1
 
         self.spin_settle = QtWidgets.QSpinBox()
-        self.spin_settle.setRange(2000, 10000)
-        self.spin_settle.setValue(2000)
+        self.spin_settle.setRange(500, 10000)
+        self.spin_settle.setValue(500)
         self.spin_settle.setSuffix(" ms")
         self.spin_slot = QtWidgets.QSpinBox()
         self.spin_slot.setRange(0, 15)
