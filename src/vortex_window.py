@@ -411,6 +411,14 @@ class VortexWindow(QtWidgets.QWidget):
             float(self.dsb_spher.value()),
         )
 
+    def get_shape_params(self) -> tuple[float, float, float, float]:
+        return (
+            float(self.dsb_axis_rotation_deg.value()),
+            float(self.dsb_phase_offset_deg.value()),
+            float(self.dsb_alpha.value()),
+            float(self.dsb_beta.value()),
+        )
+
     def set_zernike_values(
         self,
         astig_v: Optional[float] = None,
@@ -429,6 +437,22 @@ class VortexWindow(QtWidgets.QWidget):
             self.dsb_coma_y.setValue(float(coma_y))
         if spher is not None:
             self.dsb_spher.setValue(float(spher))
+
+    def set_shape_params(
+        self,
+        axis_rotation_deg: Optional[float] = None,
+        phase_offset_deg: Optional[float] = None,
+        alpha: Optional[float] = None,
+        beta: Optional[float] = None,
+    ) -> None:
+        if axis_rotation_deg is not None:
+            self.dsb_axis_rotation_deg.setValue(float(axis_rotation_deg))
+        if phase_offset_deg is not None:
+            self.dsb_phase_offset_deg.setValue(float(phase_offset_deg))
+        if alpha is not None:
+            self.dsb_alpha.setValue(float(alpha))
+        if beta is not None:
+            self.dsb_beta.setValue(float(beta))
 
     def build_mask_with_params(
         self,

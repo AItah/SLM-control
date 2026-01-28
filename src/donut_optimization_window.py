@@ -42,6 +42,9 @@ class ScanSettings:
     fast_min_step: float
     fast_multi_pass: bool
     fast_shrink_factor: float
+    shape_step_alpha: float
+    shape_step_beta: float
+    shape_step_rot_deg: float
     scan_mode: str
 
 
@@ -682,7 +685,7 @@ class OffsetScanWorker(QtCore.QObject):
 class CostScanWorker(QtCore.QObject):
     log = QtCore.Signal(str)
     progress = QtCore.Signal(int, int)
-    finished = QtCore.Signal(float, float, str)
+    finished = QtCore.Signal(object)
     failed = QtCore.Signal(str)
     dark_center = QtCore.Signal(object)
     debug_data = QtCore.Signal(object, object, object, object, object, object)
@@ -712,11 +715,11 @@ class CostScanWorker(QtCore.QObject):
     @QtCore.Slot()
     def run(self) -> None:
         try:
-            best_x, best_y, csv_path = self._run_scan()
+            result = self._run_scan()
         except Exception as exc:
             self.failed.emit(str(exc))
             return
-        self.finished.emit(best_x, best_y, csv_path)
+        self.finished.emit(result)
 
     def stop(self) -> None:
         self._running = False
@@ -728,7 +731,7 @@ class CostScanWorker(QtCore.QObject):
                 raise RuntimeError("Scan canceled.")
             time.sleep(0.05)
 
-    def _run_scan(self) -> Tuple[float, float, str]:
+    def _run_scan(self) -> dict:
         return self._run_fast_search()
 
     def _run_snake_scan(self) -> Tuple[float, float, str]:
@@ -778,11 +781,13 @@ class CostScanWorker(QtCore.QObject):
         )
         return best_a, best_b, csv_path
 
-    def _run_fast_search(self) -> Tuple[float, float, str]:
+    def _run_fast_search(self) -> dict:
         xs, ys, labels, base = self._scan_grid()
         best_x = xs[len(xs) // 2] if xs else 0.0
         best_y = ys[len(ys) // 2] if ys else 0.0
         mode = self._settings.scan_mode
+        if mode == "shape":
+            return self._run_fast_search_shape(labels, base)
 
         step_x0 = float(self._settings.x_step_mm)
         step_y0 = float(self._settings.y_step_mm)
@@ -897,7 +902,157 @@ class CostScanWorker(QtCore.QObject):
         self.log.emit(
             f"Fast search complete. Best cost={best_cost:.4f} at {labels[0]}={best_x:.3f} {labels[1]}={best_y:.3f}"
         )
-        return best_x, best_y, csv_path
+        return {
+            "a": best_x,
+            "b": best_y,
+            "c": None,
+            "csv_path": csv_path,
+        }
+
+    def _run_fast_search_shape(self, labels: tuple[str, str], base: dict) -> dict:
+        alpha = float(base["alpha"])
+        beta = float(base["beta"])
+        rotation = float(base["axis_rotation_deg"])
+
+        step_alpha0 = float(self._settings.shape_step_alpha)
+        step_beta0 = float(self._settings.shape_step_beta)
+        step_rot0 = float(self._settings.shape_step_rot_deg)
+        min_step_user = max(float(self._settings.fast_min_step), 1e-6)
+        shrink_factor = max(2.0, float(self._settings.fast_shrink_factor))
+        max_step = max(step_alpha0, step_beta0, step_rot0, 1e-9)
+        min_scale = min(1.0, min_step_user / max_step)
+
+        results: list[tuple[float, float, float, float, float, float, float]] = []
+        best_cost = self._evaluate_cost(alpha, beta, base, rotation)
+        results.append((alpha, beta, rotation, best_cost, step_alpha0, step_beta0, step_rot0))
+
+        self.log.emit(
+            f"Fast search start {labels[0]}={alpha:.3f} {labels[1]}={beta:.3f} rot={rotation:.2f} cost={best_cost:.4f}"
+        )
+        self.log.emit(
+            "Fast search steps "
+            f"step_alpha={step_alpha0:.4f} step_beta={step_beta0:.4f} "
+            f"step_rot={step_rot0:.4f} min_step={min_step_user:.4f} shrink={shrink_factor:.2f}"
+        )
+        self.log.emit("Cost metric: donut radial symmetry + center leakage.")
+
+        angles_count = max(1, int(self._settings.angles_count))
+        cx, cy = self._circle_center
+        dx0 = self._current_dark[0] - cx
+        dy0 = self._current_dark[1] - cy
+        base_angle = math.atan2(dy0, dx0) if (dx0 != 0.0 or dy0 != 0.0) else 0.0
+
+        angle_dirs = [
+            (math.cos(base_angle + (2.0 * math.pi * i / angles_count)),
+             math.sin(base_angle + (2.0 * math.pi * i / angles_count)),
+             0.0)
+            for i in range(angles_count)
+        ]
+        dirs = angle_dirs + [(0.0, 0.0, 1.0), (0.0, 0.0, -1.0)]
+
+        progress_est = max(1, len(dirs) * 10)
+        count = 1
+
+        scale = 1.0
+        last_pass = False
+        while scale >= min_scale:
+            if not self._running:
+                raise RuntimeError("Scan canceled.")
+
+            step_alpha = step_alpha0 * scale
+            step_beta = step_beta0 * scale
+            step_rot = step_rot0 * scale
+
+            improved = False
+            for dir_x, dir_y, dir_r in dirs:
+                if not self._running:
+                    raise RuntimeError("Scan canceled.")
+                cand_alpha = alpha + dir_x * step_alpha
+                cand_beta = beta + dir_y * step_beta
+                cand_rot = rotation + dir_r * step_rot
+                cand_alpha = float(np.clip(cand_alpha, 0.1, 10.0))
+                cand_beta = float(np.clip(cand_beta, 0.1, 10.0))
+                cand_rot = float(np.clip(cand_rot, -360.0, 360.0))
+
+                cost = self._evaluate_cost(cand_alpha, cand_beta, base, cand_rot)
+                results.append(
+                    (cand_alpha, cand_beta, cand_rot, cost, step_alpha, step_beta, step_rot)
+                )
+                count += 1
+                self.progress.emit(min(count, progress_est), progress_est)
+                dir_tag = (
+                    f"{math.degrees(math.atan2(dir_y, dir_x)):.1f}"
+                    if dir_r == 0.0
+                    else ("rot+" if dir_r > 0 else "rot-")
+                )
+                self.log.emit(
+                    f"Scan {labels[0]}={cand_alpha:.3f} {labels[1]}={cand_beta:.3f} "
+                    f"rot={cand_rot:.2f} cost={cost:.4f} "
+                    f"step_alpha={step_alpha:.4f} step_beta={step_beta:.4f} "
+                    f"step_rot={step_rot:.4f} dir={dir_tag}"
+                )
+                if cost < best_cost:
+                    best_cost = cost
+                    alpha, beta, rotation = cand_alpha, cand_beta, cand_rot
+                    improved = True
+
+                    while True:
+                        if not self._running:
+                            raise RuntimeError("Scan canceled.")
+                        cand_alpha = alpha + dir_x * step_alpha
+                        cand_beta = beta + dir_y * step_beta
+                        cand_rot = rotation + dir_r * step_rot
+                        cand_alpha = float(np.clip(cand_alpha, 0.1, 10.0))
+                        cand_beta = float(np.clip(cand_beta, 0.1, 10.0))
+                        cand_rot = float(np.clip(cand_rot, -360.0, 360.0))
+                        cost = self._evaluate_cost(cand_alpha, cand_beta, base, cand_rot)
+                        results.append(
+                            (cand_alpha, cand_beta, cand_rot, cost, step_alpha, step_beta, step_rot)
+                        )
+                        count += 1
+                        self.progress.emit(min(count, progress_est), progress_est)
+                        self.log.emit(
+                            f"Scan {labels[0]}={cand_alpha:.3f} {labels[1]}={cand_beta:.3f} "
+                            f"rot={cand_rot:.2f} cost={cost:.4f} "
+                            f"step_alpha={step_alpha:.4f} step_beta={step_beta:.4f} "
+                            f"step_rot={step_rot:.4f} dir={dir_tag}"
+                        )
+                        if cost < best_cost:
+                            best_cost = cost
+                            alpha, beta, rotation = cand_alpha, cand_beta, cand_rot
+                            improved = True
+                            continue
+                        break
+
+                    break
+
+            if improved:
+                if last_pass:
+                    break
+                continue
+
+            scale /= shrink_factor
+            if scale < min_scale:
+                scale = min_scale
+                last_pass = True
+            self.log.emit(
+                f"Fast search reduce step scale={scale:.4f} "
+                f"step_alpha={step_alpha0 * scale:.4f} "
+                f"step_beta={step_beta0 * scale:.4f} "
+                f"step_rot={step_rot0 * scale:.4f}"
+            )
+
+        csv_path = self._write_csv_shape(results)
+        self.log.emit(
+            f"Fast search complete. Best cost={best_cost:.4f} at "
+            f"{labels[0]}={alpha:.3f} {labels[1]}={beta:.3f} rot={rotation:.2f}"
+        )
+        return {
+            "a": alpha,
+            "b": beta,
+            "c": rotation,
+            "csv_path": csv_path,
+        }
 
     def _fast_search_attempt(
         self,
@@ -1040,7 +1195,9 @@ class CostScanWorker(QtCore.QObject):
 
         return x, y, best_cost, step, count, improved
 
-    def _evaluate_cost(self, a_val: float, b_val: float, base: dict) -> float:
+    def _evaluate_cost(
+        self, a_val: float, b_val: float, base: dict, c_val: Optional[float] = None
+    ) -> float:
         if not self._running:
             raise RuntimeError("Scan canceled.")
         prev_time = self._camera.get_last_frame_time()
@@ -1067,6 +1224,21 @@ class CostScanWorker(QtCore.QObject):
                 c_astig_o=base["c_astig_o"],
                 c_coma_y=b_val,
                 c_coma_x=a_val,
+                c_spher=base["c_spher"],
+            )
+        elif mode == "shape":
+            axis_rot = float(base["axis_rotation_deg"]) if c_val is None else float(c_val)
+            mask_u8 = self._vortex.build_mask_with_params(
+                offset_x_mm=base["offset_x_mm"],
+                offset_y_mm=base["offset_y_mm"],
+                axis_rotation_deg=axis_rot,
+                phase_offset_deg=base["phase_offset_deg"],
+                alpha=a_val,
+                beta=b_val,
+                c_astig_v=base["c_astig_v"],
+                c_astig_o=base["c_astig_o"],
+                c_coma_y=base["c_coma_y"],
+                c_coma_x=base["c_coma_x"],
                 c_spher=base["c_spher"],
             )
         else:
@@ -1223,6 +1395,7 @@ class CostScanWorker(QtCore.QObject):
     def _scan_grid(self) -> tuple[list[float], list[float], tuple[str, str], dict]:
         off_x, off_y = self._vortex.get_offsets_mm()
         astig_v, astig_o, coma_x, coma_y, spher = self._vortex.get_zernike_values()
+        axis_rot_deg, phase_offset_deg, alpha, beta = self._vortex.get_shape_params()
         base = {
             "offset_x_mm": off_x,
             "offset_y_mm": off_y,
@@ -1231,6 +1404,10 @@ class CostScanWorker(QtCore.QObject):
             "c_coma_x": coma_x,
             "c_coma_y": coma_y,
             "c_spher": spher,
+            "axis_rotation_deg": axis_rot_deg,
+            "phase_offset_deg": phase_offset_deg,
+            "alpha": alpha,
+            "beta": beta,
         }
 
         mode = self._settings.scan_mode
@@ -1243,19 +1420,26 @@ class CostScanWorker(QtCore.QObject):
         elif mode == "coma":
             center_x, center_y = coma_x, coma_y
             labels = ("coma_x", "coma_y")
+        elif mode == "shape":
+            center_x, center_y = alpha, beta
+            labels = ("alpha", "beta")
         else:
             center_x, center_y = spher, spher
             labels = ("spher", "fixed")
 
-        xs = OffsetScanWorker._build_offsets(
-            center_x, self._settings.x_range_mm, self._settings.x_step_mm
-        )
-        if mode == "spher":
+        if mode == "shape":
+            xs = [center_x]
             ys = [center_y]
         else:
-            ys = OffsetScanWorker._build_offsets(
-                center_y, self._settings.y_range_mm, self._settings.y_step_mm
+            xs = OffsetScanWorker._build_offsets(
+                center_x, self._settings.x_range_mm, self._settings.x_step_mm
             )
+            if mode == "spher":
+                ys = [center_y]
+            else:
+                ys = OffsetScanWorker._build_offsets(
+                    center_y, self._settings.y_range_mm, self._settings.y_step_mm
+                )
         return xs, ys, labels, base
 
     @staticmethod
@@ -1297,6 +1481,28 @@ class CostScanWorker(QtCore.QObject):
         with path.open("w", newline="", encoding="utf-8") as f:
             writer = csv.writer(f)
             writer.writerow([labels[0], labels[1], "cost", "step_x", "step_y"])
+            writer.writerows(results)
+        return str(path)
+
+    @staticmethod
+    def _write_csv_shape(
+        results: list[tuple[float, float, float, float, float, float, float]]
+    ) -> str:
+        ts = time.strftime("%Y%m%d_%H%M%S")
+        path = Path.cwd() / f"donut_scan_{ts}.csv"
+        with path.open("w", newline="", encoding="utf-8") as f:
+            writer = csv.writer(f)
+            writer.writerow(
+                [
+                    "alpha",
+                    "beta",
+                    "rotation_deg",
+                    "cost",
+                    "step_alpha",
+                    "step_beta",
+                    "step_rot_deg",
+                ]
+            )
             writer.writerows(results)
         return str(path)
 
@@ -2045,6 +2251,32 @@ class DonutOptimizationWindow(QtWidgets.QDialog):
         scan_layout.addWidget(self.dsb_y_step, r, 3)
         r += 1
 
+        self.dsb_shape_step_alpha = QtWidgets.QDoubleSpinBox()
+        self.dsb_shape_step_alpha.setRange(0.1, 10.0)
+        self.dsb_shape_step_alpha.setDecimals(2)
+        self.dsb_shape_step_alpha.setValue(1.0)
+        self.dsb_shape_step_alpha.setToolTip("Alpha step size for shape scan.")
+        self.dsb_shape_step_beta = QtWidgets.QDoubleSpinBox()
+        self.dsb_shape_step_beta.setRange(0.1, 10.0)
+        self.dsb_shape_step_beta.setDecimals(2)
+        self.dsb_shape_step_beta.setValue(1.0)
+        self.dsb_shape_step_beta.setToolTip("Beta step size for shape scan.")
+        self.dsb_shape_step_rot = QtWidgets.QDoubleSpinBox()
+        self.dsb_shape_step_rot.setRange(0.1, 10.0)
+        self.dsb_shape_step_rot.setDecimals(2)
+        self.dsb_shape_step_rot.setValue(1.0)
+        self.dsb_shape_step_rot.setSuffix(" deg")
+        self.dsb_shape_step_rot.setToolTip("Axis rotation step (degrees) for shape scan.")
+
+        scan_layout.addWidget(QtWidgets.QLabel("Alpha step"), r, 0)
+        scan_layout.addWidget(self.dsb_shape_step_alpha, r, 1)
+        scan_layout.addWidget(QtWidgets.QLabel("Beta step"), r, 2)
+        scan_layout.addWidget(self.dsb_shape_step_beta, r, 3)
+        r += 1
+        scan_layout.addWidget(QtWidgets.QLabel("Rotation step"), r, 0)
+        scan_layout.addWidget(self.dsb_shape_step_rot, r, 1)
+        r += 1
+
         self.spin_settle = QtWidgets.QSpinBox()
         self.spin_settle.setRange(100, 10000)
         self.spin_settle.setValue(500)
@@ -2084,10 +2316,12 @@ class DonutOptimizationWindow(QtWidgets.QDialog):
         self.chk_scan_astig = QtWidgets.QCheckBox("Astigmatism")
         self.chk_scan_coma = QtWidgets.QCheckBox("Coma")
         self.chk_scan_spher = QtWidgets.QCheckBox("Spherical")
+        self.chk_scan_shape = QtWidgets.QCheckBox("Shape")
         self.chk_scan_shift.setToolTip("Optimize X/Y shift offsets.")
         self.chk_scan_astig.setToolTip("Optimize astigmatism coefficients.")
         self.chk_scan_coma.setToolTip("Optimize coma coefficients.")
         self.chk_scan_spher.setToolTip("Optimize spherical coefficient.")
+        self.chk_scan_shape.setToolTip("Optimize alpha/beta/rotation shape parameters.")
         self.chk_scan_shift.setChecked(True)
         scan_layout.addWidget(QtWidgets.QLabel("Scan modes"), r, 0)
         scan_layout.addWidget(self.chk_scan_shift, r, 1)
@@ -2095,6 +2329,7 @@ class DonutOptimizationWindow(QtWidgets.QDialog):
         scan_layout.addWidget(self.chk_scan_coma, r, 3)
         r += 1
         scan_layout.addWidget(self.chk_scan_spher, r, 1)
+        scan_layout.addWidget(self.chk_scan_shape, r, 2)
 
         layout.addWidget(scan_group)
 
@@ -2422,6 +2657,13 @@ class DonutOptimizationWindow(QtWidgets.QDialog):
         self._active_scan_mode = mode
         idx = (self._scan_total - len(self._scan_queue))
         self._append_log(f"Starting {mode} scan ({idx}/{self._scan_total})...")
+        if mode == "shape":
+            self._append_log(
+                "Shape scan: optimizing alpha, beta, and axis rotation. "
+                f"steps: alpha={self.dsb_shape_step_alpha.value():.2f} "
+                f"beta={self.dsb_shape_step_beta.value():.2f} "
+                f"rot={self.dsb_shape_step_rot.value():.2f} deg"
+            )
 
         settings = self._build_scan_settings(mode)
         self._thread = QtCore.QThread(self)
@@ -2463,24 +2705,40 @@ class DonutOptimizationWindow(QtWidgets.QDialog):
         self._vortex.set_offsets_mm(best_x, best_y)
         self._stop()
 
-    def _on_scan_finished(self, best_x: float, best_y: float, csv_path: str) -> None:
+    def _on_scan_finished(self, result: dict) -> None:
         mode = self._active_scan_mode or "shift"
+        best_x = float(result.get("a", 0.0))
+        best_y = float(result.get("b", 0.0))
+        best_c = result.get("c")
+        csv_path = result.get("csv_path", "")
+
         if mode == "shift":
             msg = f"Scan complete. Best X={best_x:.3f} mm, Y={best_y:.3f} mm"
         elif mode == "astig":
             msg = f"Scan complete. Best astig_v={best_x:.3f}, astig_o={best_y:.3f}"
         elif mode == "coma":
             msg = f"Scan complete. Best coma_x={best_x:.3f}, coma_y={best_y:.3f}"
+        elif mode == "shape":
+            rot = float(best_c) if best_c is not None else 0.0
+            msg = (
+                f"Scan complete. Best alpha={best_x:.3f}, beta={best_y:.3f}, "
+                f"rotation={rot:.2f} deg"
+            )
         else:
             msg = f"Scan complete. Best spherical={best_x:.3f}"
         self._append_log(msg)
-        self._append_log(f"Saved scan CSV: {csv_path}")
+        if csv_path:
+            self._append_log(f"Saved scan CSV: {csv_path}")
+
         if mode == "shift":
             self._vortex.set_offsets_mm(best_x, best_y)
         elif mode == "astig":
             self._vortex.set_zernike_values(astig_v=best_x, astig_o=best_y)
         elif mode == "coma":
             self._vortex.set_zernike_values(coma_x=best_x, coma_y=best_y)
+        elif mode == "shape":
+            rot = float(best_c) if best_c is not None else 0.0
+            self._vortex.set_shape_params(axis_rotation_deg=rot, alpha=best_x, beta=best_y)
         else:
             self._vortex.set_zernike_values(spher=best_x)
 
@@ -2524,6 +2782,15 @@ class DonutOptimizationWindow(QtWidgets.QDialog):
         self.dsb_fast_min_step.setValue(
             float(settings.value("fast_min_step", self.dsb_fast_min_step.value()))
         )
+        self.dsb_shape_step_alpha.setValue(
+            float(settings.value("shape_step_alpha", self.dsb_shape_step_alpha.value()))
+        )
+        self.dsb_shape_step_beta.setValue(
+            float(settings.value("shape_step_beta", self.dsb_shape_step_beta.value()))
+        )
+        self.dsb_shape_step_rot.setValue(
+            float(settings.value("shape_step_rot", self.dsb_shape_step_rot.value()))
+        )
         self.dsb_fast_shrink.setValue(
             float(settings.value("fast_shrink", self.dsb_fast_shrink.value()))
         )
@@ -2533,6 +2800,7 @@ class DonutOptimizationWindow(QtWidgets.QDialog):
         self.chk_scan_astig.setChecked(bool(settings.value("scan_astig", False, bool)))
         self.chk_scan_coma.setChecked(bool(settings.value("scan_coma", False, bool)))
         self.chk_scan_spher.setChecked(bool(settings.value("scan_spher", False, bool)))
+        self.chk_scan_shape.setChecked(bool(settings.value("scan_shape", False, bool)))
         if not self._selected_scan_modes():
             self.chk_scan_shift.setChecked(True)
 
@@ -2590,12 +2858,16 @@ class DonutOptimizationWindow(QtWidgets.QDialog):
         settings.setValue("slot", int(self.spin_slot.value()))
         settings.setValue("angles_count", int(self.spin_angles.value()))
         settings.setValue("fast_min_step", float(self.dsb_fast_min_step.value()))
+        settings.setValue("shape_step_alpha", float(self.dsb_shape_step_alpha.value()))
+        settings.setValue("shape_step_beta", float(self.dsb_shape_step_beta.value()))
+        settings.setValue("shape_step_rot", float(self.dsb_shape_step_rot.value()))
         settings.setValue("fast_shrink", float(self.dsb_fast_shrink.value()))
         settings.setValue("debug_enabled", self.chk_debug.isChecked())
         settings.setValue("scan_shift", self.chk_scan_shift.isChecked())
         settings.setValue("scan_astig", self.chk_scan_astig.isChecked())
         settings.setValue("scan_coma", self.chk_scan_coma.isChecked())
         settings.setValue("scan_spher", self.chk_scan_spher.isChecked())
+        settings.setValue("scan_shape", self.chk_scan_shape.isChecked())
         settings.setValue("visible", self.isVisible())
 
         if self._manual_center is None:
@@ -2623,16 +2895,15 @@ class DonutOptimizationWindow(QtWidgets.QDialog):
         settings.endGroup()
 
     def _selected_scan_modes(self) -> list[str]:
-        modes: list[str] = []
-        if self.chk_scan_shift.isChecked():
-            modes.append("shift")
-        if self.chk_scan_astig.isChecked():
-            modes.append("astig")
-        if self.chk_scan_coma.isChecked():
-            modes.append("coma")
-        if self.chk_scan_spher.isChecked():
-            modes.append("spher")
-        return modes
+        order = ("shift", "shape", "astig", "coma", "spher")
+        selected = {
+            "shift": self.chk_scan_shift.isChecked(),
+            "astig": self.chk_scan_astig.isChecked(),
+            "coma": self.chk_scan_coma.isChecked(),
+            "spher": self.chk_scan_spher.isChecked(),
+            "shape": self.chk_scan_shape.isChecked(),
+        }
+        return [mode for mode in order if selected.get(mode, False)]
 
     def _build_scan_settings(self, mode: str) -> ScanSettings:
         return ScanSettings(
