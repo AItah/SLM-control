@@ -88,6 +88,13 @@ class OffsetScanWorker(QtCore.QObject):
     def stop(self) -> None:
         self._running = False
 
+    def _sleep_with_cancel(self, duration_s: float) -> None:
+        end_time = time.monotonic() + max(0.0, duration_s)
+        while time.monotonic() < end_time:
+            if not self._running:
+                raise RuntimeError("Scan canceled.")
+            time.sleep(0.05)
+
     def _run_scan(self) -> Tuple[float, float]:
         center_x, center_y = self._vortex.get_offsets_mm()
         self.log.emit(f"Starting scan at center X={center_x:.3f} mm, Y={center_y:.3f} mm")
@@ -186,6 +193,8 @@ class OffsetScanWorker(QtCore.QObject):
         return [start + i * step for i in range(count)]
 
     def _evaluate_offset(self, offset_x_mm: float, offset_y_mm: float) -> float:
+        if not self._running:
+            raise RuntimeError("Scan canceled.")
         prev_time = self._camera.get_last_frame_time()
         mask_u8 = self._vortex.build_mask(offset_x_mm, offset_y_mm)
         ok = self._slm.send_mask_to_slot(mask_u8, self._settings.slot)
@@ -193,11 +202,13 @@ class OffsetScanWorker(QtCore.QObject):
             raise RuntimeError("Failed to send mask to SLM.")
 
         self.log.emit("Waiting for SLM settle...")
-        time.sleep(max(2.0, self._settings.settle_ms / 1000.0))
+        self._sleep_with_cancel(max(2.0, self._settings.settle_ms / 1000.0))
 
         # Wait briefly for a fresh frame
         timeout = time.monotonic() + 1.0
         while time.monotonic() < timeout:
+            if not self._running:
+                raise RuntimeError("Scan canceled.")
             if self._camera.get_last_frame_time() > prev_time:
                 break
             time.sleep(0.05)
@@ -700,6 +711,13 @@ class CostScanWorker(QtCore.QObject):
     def stop(self) -> None:
         self._running = False
 
+    def _sleep_with_cancel(self, duration_s: float) -> None:
+        end_time = time.monotonic() + max(0.0, duration_s)
+        while time.monotonic() < end_time:
+            if not self._running:
+                raise RuntimeError("Scan canceled.")
+            time.sleep(0.05)
+
     def _run_scan(self) -> Tuple[float, float, str]:
         if self._settings.fast_search:
             return self._run_fast_search()
@@ -707,10 +725,15 @@ class CostScanWorker(QtCore.QObject):
 
     def _run_snake_scan(self) -> Tuple[float, float, str]:
         xs, ys, labels, base = self._scan_grid()
+        self.log.emit(
+            "Snake scan steps "
+            f"x_step={self._settings.x_step_mm:.4f} y_step={self._settings.y_step_mm:.4f} "
+            f"x_range={self._settings.x_range_mm:.4f} y_range={self._settings.y_range_mm:.4f}"
+        )
         total = max(1, len(xs) * len(ys))
         count = 0
 
-        results: list[tuple[float, float, float]] = []
+        results: list[tuple[float, float, float, float, float]] = []
         best_cost = float("inf")
         best_a = xs[0] if xs else 0.0
         best_b = ys[0] if ys else 0.0
@@ -723,7 +746,15 @@ class CostScanWorker(QtCore.QObject):
                 if not self._running:
                     raise RuntimeError("Scan canceled.")
                 cost = self._evaluate_cost(a_val, b_val, base)
-                results.append((a_val, b_val, cost))
+                results.append(
+                    (
+                        a_val,
+                        b_val,
+                        cost,
+                        float(self._settings.x_step_mm),
+                        float(self._settings.y_step_mm),
+                    )
+                )
                 if cost < best_cost:
                     best_cost = cost
                     best_a, best_b = a_val, b_val
@@ -754,12 +785,18 @@ class CostScanWorker(QtCore.QObject):
         min_step_x = min(step_x, min_step_user)
         min_step_y = min(step_y, min_step_user)
 
-        results: list[tuple[float, float, float]] = []
+        results: list[tuple[float, float, float, float, float]] = []
         best_x, best_y = center_x, center_y
         best_cost = self._evaluate_cost(best_x, best_y, base)
-        results.append((best_x, best_y, best_cost))
+        results.append((best_x, best_y, best_cost, step_x, step_y))
         self.log.emit(
             f"Fast search start {labels[0]}={best_x:.3f} {labels[1]}={best_y:.3f} cost={best_cost:.4f}"
+        )
+        self.log.emit(
+            "Fast search steps "
+            f"step_x={step_x:.4f} step_y={step_y:.4f} "
+            f"min_step={min_step_user:.4f} "
+            f"x_range={self._settings.x_range_mm:.4f} y_range={self._settings.y_range_mm:.4f}"
         )
 
         progress_est = max(
@@ -776,6 +813,8 @@ class CostScanWorker(QtCore.QObject):
             pass_step_x = step_x
             pass_step_y = step_y
             while True:
+                if not self._running:
+                    raise RuntimeError("Scan canceled.")
                 pass_idx += 1
                 pass_min_x = max(min_step_x, pass_step_x * 0.5)
                 pass_min_y = max(min_step_y, pass_step_y * 0.5)
@@ -839,13 +878,15 @@ class CostScanWorker(QtCore.QObject):
         bounds_x: Tuple[float, float],
         bounds_y: Tuple[float, float],
         best_cost: float,
-        results: list[tuple[float, float, float]],
+        results: list[tuple[float, float, float, float, float]],
         count: int,
         total: int,
         base: dict,
     ) -> Tuple[float, float, float, float, float, int]:
         best_x, best_y = center
         while step_x >= min_step_x or step_y >= min_step_y:
+            if not self._running:
+                raise RuntimeError("Scan canceled.")
             improved = False
 
             best_x, best_y, best_cost, step_x, count, improved_x = self._walk_axis(
@@ -859,6 +900,7 @@ class CostScanWorker(QtCore.QObject):
                 count=count,
                 total=total,
                 base=base,
+                step_pair=(step_x, step_y),
             )
             if step_x < min_step_x:
                 step_x = min_step_x
@@ -874,6 +916,7 @@ class CostScanWorker(QtCore.QObject):
                 count=count,
                 total=total,
                 base=base,
+                step_pair=(step_x, step_y),
             )
             if step_y < min_step_y:
                 step_y = min_step_y
@@ -898,11 +941,14 @@ class CostScanWorker(QtCore.QObject):
         min_step: float,
         bounds: Tuple[float, float],
         best_cost: float,
-        results: list[tuple[float, float, float]],
+        results: list[tuple[float, float, float, float, float]],
         count: int,
         total: int,
         base: dict,
+        step_pair: Tuple[float, float],
     ) -> Tuple[float, float, float, float, int, bool]:
+        if not self._running:
+            raise RuntimeError("Scan canceled.")
         if step < min_step:
             return center[0], center[1], best_cost, step, count, False
 
@@ -910,6 +956,8 @@ class CostScanWorker(QtCore.QObject):
         improved = False
         direction = 1.0
         for _ in range(2):
+            if not self._running:
+                raise RuntimeError("Scan canceled.")
             cand = x + direction * step if axis == "x" else y + direction * step
             if cand < bounds[0] or cand > bounds[1]:
                 direction *= -1.0
@@ -917,11 +965,11 @@ class CostScanWorker(QtCore.QObject):
             cx = cand if axis == "x" else x
             cy = cand if axis == "y" else y
             cost = self._evaluate_cost(cx, cy, base)
-            results.append((cx, cy, cost))
+            results.append((cx, cy, cost, step_pair[0], step_pair[1]))
             count += 1
             self.progress.emit(min(count, total), total)
             self.log.emit(
-                f"Fast {axis.upper()} x={cx:.3f} y={cy:.3f} cost={cost:.4f}"
+                f"Fast {axis.upper()} x={cx:.3f} y={cy:.3f} cost={cost:.4f} step={step:.4f}"
             )
             if cost < best_cost:
                 best_cost = cost
@@ -936,17 +984,19 @@ class CostScanWorker(QtCore.QObject):
 
         # Continue in the improving direction until it stops improving
         while step >= min_step:
+            if not self._running:
+                raise RuntimeError("Scan canceled.")
             cand = x + direction * step if axis == "x" else y + direction * step
             if cand < bounds[0] or cand > bounds[1]:
                 break
             cx = cand if axis == "x" else x
             cy = cand if axis == "y" else y
             cost = self._evaluate_cost(cx, cy, base)
-            results.append((cx, cy, cost))
+            results.append((cx, cy, cost, step_pair[0], step_pair[1]))
             count += 1
             self.progress.emit(min(count, total), total)
             self.log.emit(
-                f"Fast {axis.upper()} x={cx:.3f} y={cy:.3f} cost={cost:.4f}"
+                f"Fast {axis.upper()} x={cx:.3f} y={cy:.3f} cost={cost:.4f} step={step:.4f}"
             )
             if cost < best_cost:
                 best_cost = cost
@@ -960,6 +1010,8 @@ class CostScanWorker(QtCore.QObject):
         return x, y, best_cost, step, count, improved
 
     def _evaluate_cost(self, a_val: float, b_val: float, base: dict) -> float:
+        if not self._running:
+            raise RuntimeError("Scan canceled.")
         prev_time = self._camera.get_last_frame_time()
         mode = self._settings.scan_mode
         if mode == "shift":
@@ -1000,10 +1052,12 @@ class CostScanWorker(QtCore.QObject):
         if not ok:
             raise RuntimeError("Failed to send mask to SLM.")
 
-        time.sleep(max(2.0, self._settings.settle_ms / 1000.0))
+        self._sleep_with_cancel(max(2.0, self._settings.settle_ms / 1000.0))
 
         timeout = time.monotonic() + 1.0
         while time.monotonic() < timeout:
+            if not self._running:
+                raise RuntimeError("Scan canceled.")
             if self._camera.get_last_frame_time() > prev_time:
                 break
             time.sleep(0.05)
@@ -1135,12 +1189,15 @@ class CostScanWorker(QtCore.QObject):
         return asymmetry_score + (center_leakage * 10.0)
 
     @staticmethod
-    def _write_csv(results: list[tuple[float, float, float]], labels: tuple[str, str]) -> str:
+    def _write_csv(
+        results: list[tuple[float, float, float, float, float]],
+        labels: tuple[str, str],
+    ) -> str:
         ts = time.strftime("%Y%m%d_%H%M%S")
         path = Path.cwd() / f"donut_scan_{ts}.csv"
         with path.open("w", newline="", encoding="utf-8") as f:
             writer = csv.writer(f)
-            writer.writerow([labels[0], labels[1], "cost"])
+            writer.writerow([labels[0], labels[1], "cost", "step_x", "step_y"])
             writer.writerows(results)
         return str(path)
 
