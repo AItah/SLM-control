@@ -804,6 +804,10 @@ class CostScanWorker(QtCore.QObject):
             f"step_x={step_x0:.4f} step_y={step_y0:.4f} "
             f"min_step={min_step_user:.4f}"
         )
+        if mode == "spher":
+            self.log.emit("Cost metric: (max - noise) / (dark - noise) from crop + dark spot.")
+        else:
+            self.log.emit("Cost metric: donut radial symmetry + center leakage.")
 
         directions_count = max(1, int(self._settings.angles_count))
         progress_est = max(1, directions_count * 10)
@@ -843,7 +847,7 @@ class CostScanWorker(QtCore.QObject):
                 self.progress.emit(min(count, progress_est), progress_est)
                 self.log.emit(
                     f"Fast dir={math.degrees(angle):.1f} "
-                    f"x={cand_x:.3f} y={cand_y:.3f} cost={cost:.4f} "
+                    f"{labels[0]}={cand_x:.3f} {labels[1]}={cand_y:.3f} cost={cost:.4f} "
                     f"step_x={step_x:.4f} step_y={step_y:.4f}"
                 )
                 if cost < best_cost:
@@ -863,7 +867,7 @@ class CostScanWorker(QtCore.QObject):
                         self.progress.emit(min(count, progress_est), progress_est)
                         self.log.emit(
                             f"Fast dir={math.degrees(angle):.1f} "
-                            f"x={cand_x:.3f} y={cand_y:.3f} cost={cost:.4f} "
+                            f"{labels[0]}={cand_x:.3f} {labels[1]}={cand_y:.3f} cost={cost:.4f} "
                             f"step_x={step_x:.4f} step_y={step_y:.4f}"
                         )
                         if cost < best_cost:
