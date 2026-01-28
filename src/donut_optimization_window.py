@@ -1076,6 +1076,7 @@ class CostScanWorker(QtCore.QObject):
             raise RuntimeError("No camera frame available.")
 
         gray = OffsetScanWorker._to_gray(frame)
+        raw_gray = gray
         if self._settings.filter_enabled:
             thr = float(self._settings.filter_threshold)
             gray = gray.copy()
@@ -1098,13 +1099,30 @@ class CostScanWorker(QtCore.QObject):
         dark_x, dark_y = self._current_dark
         center_in_crop = (float(dark_x - x0c), float(dark_y - y0c))
 
-        cost = self._donut_cost(
-            crop,
-            center_in_crop,
-            max_r=radius,
-            num_angles=max(8, int(self._settings.angles_count)),
-            num_pts=100,
-        )
+        dark_noise = None
+        max_intensity = None
+        dark_spot_intensity = None
+        ratio = None
+        if mode == "spher":
+            dark_noise = self._estimate_dark_noise(raw_gray)
+            max_intensity = float(np.max(crop)) if crop is not None and crop.size else 0.0
+            dark_spot_intensity = self._sample_dark_spot_min(gray, self._current_dark)
+            numerator = max_intensity - dark_noise
+            denom = dark_spot_intensity - dark_noise
+            if numerator <= 0.0:
+                cost = float("inf")
+            else:
+                denom = max(denom, 1e-6)
+                ratio = numerator / denom
+                cost = 1.0 / max(ratio, 1e-9)
+        else:
+            cost = self._donut_cost(
+                crop,
+                center_in_crop,
+                max_r=radius,
+                num_angles=max(8, int(self._settings.angles_count)),
+                num_pts=100,
+            )
 
         if self._settings.debug_enabled:
             base_angle = math.atan2(dark_y - cy, dark_x - cx)
@@ -1125,11 +1143,60 @@ class CostScanWorker(QtCore.QObject):
                 "profile_x_mm": (float(profile_x_mm[0]), float(profile_x_mm[-1])),
                 "cost": float(cost),
             }
+            if mode == "spher":
+                meta["dark_noise"] = float(dark_noise) if dark_noise is not None else None
+                meta["max_intensity"] = (
+                    float(max_intensity) if max_intensity is not None else None
+                )
+                meta["dark_spot_intensity"] = (
+                    float(dark_spot_intensity) if dark_spot_intensity is not None else None
+                )
+                meta["spher_ratio"] = float(ratio) if ratio is not None else None
             if self._settings.filter_enabled:
                 meta["filter_threshold"] = float(self._settings.filter_threshold)
             self.debug_data.emit(crop, overlay, None, None, meta, (profile_x_mm, profile_y))
 
         return float(cost)
+
+    @staticmethod
+    def _estimate_dark_noise(gray: np.ndarray) -> float:
+        if gray is None or gray.size == 0:
+            return 0.0
+        h, w = gray.shape[:2]
+        patch = max(5, int(min(h, w) * 0.05))
+        x1 = min(w, patch)
+        y1 = min(h, patch)
+        patches = [
+            gray[0:y1, 0:x1],
+            gray[0:y1, max(0, w - x1) : w],
+            gray[max(0, h - y1) : h, 0:x1],
+            gray[max(0, h - y1) : h, max(0, w - x1) : w],
+        ]
+        vals = [float(np.median(p)) for p in patches if p is not None and p.size]
+        if not vals:
+            return float(np.median(gray))
+        return float(np.median(np.array(vals, dtype=np.float32)))
+
+    @staticmethod
+    def _sample_dark_spot_min(
+        gray: np.ndarray, center: Tuple[float, float], radius_px: int = 4
+    ) -> float:
+        if gray is None or gray.size == 0:
+            return 0.0
+        h, w = gray.shape[:2]
+        cx = int(round(center[0]))
+        cy = int(round(center[1]))
+        r = max(1, int(radius_px))
+        x0 = max(0, cx - r)
+        x1 = min(w, cx + r + 1)
+        y0 = max(0, cy - r)
+        y1 = min(h, cy + r + 1)
+        if x0 >= x1 or y0 >= y1:
+            if 0 <= cx < w and 0 <= cy < h:
+                return float(gray[cy, cx])
+            return float(np.min(gray))
+        patch = gray[y0:y1, x0:x1]
+        return float(np.min(patch)) if patch.size else float(gray[cy, cx])
 
     def _scan_grid(self) -> tuple[list[float], list[float], tuple[str, str], dict]:
         off_x, off_y = self._vortex.get_offsets_mm()
@@ -1677,6 +1744,14 @@ class DebugWindow(QtWidgets.QDialog):
             lines.append(f"filter_threshold={meta['filter_threshold']}")
         if meta.get("cost") is not None:
             lines.append(f"cost={meta['cost']:.4f}")
+        if meta.get("dark_noise") is not None:
+            lines.append(f"dark_noise={meta['dark_noise']:.2f}")
+        if meta.get("max_intensity") is not None:
+            lines.append(f"max_intensity={meta['max_intensity']:.2f}")
+        if meta.get("dark_spot_intensity") is not None:
+            lines.append(f"dark_spot_intensity={meta['dark_spot_intensity']:.2f}")
+        if meta.get("spher_ratio") is not None:
+            lines.append(f"spher_ratio={meta['spher_ratio']:.4f}")
         if meta.get("score_px") is not None:
             lines.append(f"score_px={meta['score_px']:.3f}")
 
