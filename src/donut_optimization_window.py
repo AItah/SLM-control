@@ -2038,7 +2038,7 @@ class DonutOptimizationWindow(QtWidgets.QDialog):
         r += 1
 
         self.spin_angles = QtWidgets.QSpinBox()
-        self.spin_angles.setRange(4, 360)
+        self.spin_angles.setRange(2, 360)
         self.spin_angles.setValue(10)
         scan_layout.addWidget(QtWidgets.QLabel("Angles"), r, 0)
         scan_layout.addWidget(self.spin_angles, r, 1)
