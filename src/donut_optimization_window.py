@@ -1853,7 +1853,7 @@ class DonutOptimizationWindow(QtWidgets.QDialog):
         r += 1
 
         self.spin_settle = QtWidgets.QSpinBox()
-        self.spin_settle.setRange(500, 10000)
+        self.spin_settle.setRange(100, 10000)
         self.spin_settle.setValue(500)
         self.spin_settle.setSuffix(" ms")
         self.spin_slot = QtWidgets.QSpinBox()
