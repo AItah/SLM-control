@@ -1881,6 +1881,11 @@ class DonutOptimizationWindow(QtWidgets.QDialog):
         self.spin_filter.setValue(10)
         self.btn_clear_manual = QtWidgets.QPushButton("Clear")
         self.btn_clear_manual.clicked.connect(self._clear_manual_target)
+        self.dsb_auto_circle_mm = QtWidgets.QDoubleSpinBox()
+        self.dsb_auto_circle_mm.setRange(0.000001, 1000.0)
+        self.dsb_auto_circle_mm.setDecimals(6)
+        self.dsb_auto_circle_mm.setValue(1.000000)
+        self.dsb_auto_circle_mm.setSuffix(" mm")
 
         manual_layout.addWidget(self.lbl_manual_center, 0, 0, 1, 2)
         manual_layout.addWidget(self.lbl_manual_radius, 1, 0, 1, 2)
@@ -1891,6 +1896,8 @@ class DonutOptimizationWindow(QtWidgets.QDialog):
         manual_layout.addWidget(self.btn_clear_manual, 0, 3, 2, 1)
         manual_layout.addWidget(self.chk_filter, 3, 0)
         manual_layout.addWidget(self.spin_filter, 3, 1)
+        manual_layout.addWidget(QtWidgets.QLabel("Auto circle radius"), 3, 2)
+        manual_layout.addWidget(self.dsb_auto_circle_mm, 3, 3)
         manual_layout.addWidget(self.btn_refine_dark, 2, 2, 1, 2)
         manual_layout.addWidget(self.btn_analyze, 4, 0, 1, 4)
         layout.addWidget(manual_group)
@@ -2163,6 +2170,31 @@ class DonutOptimizationWindow(QtWidgets.QDialog):
         out[out < thr] = 0.0
         return out
 
+    def _auto_set_circle_from_dark(self) -> bool:
+        if self._manual_center is None:
+            self._append_error("Please pick the dark spot center.")
+            return False
+        radius_mm = float(self.dsb_auto_circle_mm.value())
+        if radius_mm <= 0:
+            self._append_error("Auto circle radius must be > 0.")
+            return False
+        pixel_size_mm = float(self.dsb_px_um.value()) * 1e-3
+        if pixel_size_mm <= 0:
+            self._append_error("Camera pixel size must be > 0.")
+            return False
+        radius_px = radius_mm / pixel_size_mm
+        self._circle_center = (float(self._manual_center[0]), float(self._manual_center[1]))
+        self._manual_radius = float(radius_px)
+        self._update_manual_labels()
+        if hasattr(self._camera, "set_selected_circle"):
+            self._camera.set_selected_circle(
+                self._circle_center, self._manual_radius, emit=False
+            )
+        self._append_log(
+            f"Auto donut circle set: radius={radius_px:.1f} px ({radius_mm:.6f} mm)"
+        )
+        return True
+
     @staticmethod
     def _draw_angle_lines(
         crop: np.ndarray,
@@ -2236,12 +2268,12 @@ class DonutOptimizationWindow(QtWidgets.QDialog):
         if not self._camera.is_running():
             self._append_error("Camera must be running.")
             return
-        if self._circle_center is None or self._manual_radius is None:
-            self._append_error("Please draw the donut circle.")
-            return
         if self._manual_center is None:
             self._append_error("Please pick the dark spot center.")
             return
+        if self._circle_center is None or self._manual_radius is None:
+            if not self._auto_set_circle_from_dark():
+                return
         if self._manual_radius <= 0:
             self._append_error("Manual circle radius must be > 0.")
             return
